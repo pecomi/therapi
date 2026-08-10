@@ -1,0 +1,3 @@
+[submodule "src/embedding/CSG2A"]
+	path = src/embedding/CSG2A
+	url = https://github.com/eugenebang/CSG2A.git
