@@ -121,6 +121,7 @@ def train_aligner(args):
                 'target_weightencoder': target_weightencoder.state_dict(),
                 'emb_dis_classifier': emb_dis_classifier.state_dict(),
                 'exp_dis_classifier': exp_dis_classifier.state_dict(),
+                'center_criterion': center_criterion.state_dict(),
                 'optimizer': optimizer.state_dict()
                 }, f'ckpts/{model_name}.pt')
    

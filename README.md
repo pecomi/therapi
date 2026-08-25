@@ -113,5 +113,84 @@ THERAPI/visualizations/
 └── main_figure5(b).ipynb
 ```
 
+## Patient-level TCGA unlearning
+
+The unlearning utilities operate on the TCGA samples used to train the aligner
+(`TCGA_unlabeled_gex.csv`).  A split is made at the participant level, so every
+sample whose barcode starts with the same `TCGA-TSS-PARTICIPANT` prefix receives
+the same assignment.
+
+Create a tissue-stratified 5% forget split:
+
+```bash
+python src/unlearning/make_forget_split.py \
+  --data_dir data \
+  --forget-ratio 0.05 \
+  --split-seed 0 \
+  --output-dir splits/random_patient_5pct_seed0
+```
+
+This writes patient and sample manifests plus a metadata file under the output
+directory.  Reuse the same manifest for unlearning and deletion-retraining; do
+not resample patients inside a training script.
+
+Run forget-only gradient ascent from an original aligner checkpoint:
+
+```bash
+python src/unlearning/train.py \
+  --data_dir data \
+  --checkpoint run/baseline_seed0/ckpts/THERAPI_aligner_GDSC_TCGA.pt \
+  --split-dir splits/random_patient_5pct_seed0 \
+  --output-dir run/unlearn_5pct_seed0 \
+  --device cuda:0 \
+  --original-train-seed 0 \
+  --unlearn-seed 0 \
+  --lr 1e-5
+```
+
+The minimized objective is the negative TCGA forget alignment loss:
+`-(0.2 * reconstruction + 0.4 * classification + 0.8 * center)`.  Every module
+on this target-loss backpropagation route is updated: the GDSC source encoder,
+the target Q/K attention encoder, and both tissue classifiers.  The source and
+target reconstruction decoders are frozen.  Retain data is never used for an
+optimizer update; its metrics are reported for evaluation only. Gradients are
+accumulated over every forget mini-batch and `optimizer.step()` is called
+exactly once. Gradient clipping is intentionally commented out in
+`src/unlearning/train.py` for the initial explosion-observation experiment.
+
+The original trainer used fixed random center anchors because `CenterLoss`
+parameters were not part of its optimizer.  New original checkpoints save
+those anchors.  For legacy checkpoints, `--original-train-seed` reconstructs
+them using the original initialization order.  Center loss still backpropagates
+through target latent representations, but the center parameters themselves
+are always fixed.
+
+For the deletion-retraining reference, train a fresh aligner with GDSC and only
+the retain TCGA rows from the same manifest:
+
+```bash
+python src/unlearning/retrain.py \
+  --data_dir data \
+  --split-dir splits/random_patient_5pct_seed0 \
+  --output-dir run/retrain_retain_5pct_seed0 \
+  --device cuda:0 \
+  --seed 0
+```
+
+This is training from random initialization, not fine-tuning the original
+checkpoint. Its model, objective, default 199 epochs, batch size, and learning
+rate match `train_aligner.py`; the only data change is that forget TCGA samples
+are excluded from the target DataLoader.
+
+Use separate seeds for separate sources of variation:
+
+* `--split-seed` controls which patients are forgotten.
+* the original aligner's `--seed` controls model initialization/training.
+* `--unlearn-seed` controls unlearning batch order.
+
+The aligner-level unlearning path is independent of the optional CSG2A
+embedding regeneration and can therefore be evaluated before downstream drug
+response embeddings are rebuilt.
+
 ## Contact
 If you have any questions or concerns, please send an email to [inyoung.sung@snu.ac.kr](inyoung.sung@snu.ac.kr).
