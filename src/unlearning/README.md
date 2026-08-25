@@ -21,7 +21,7 @@ source unlearn/bin/activate
 아래 예시는 다음 이름을 사용한다.
 
 ```bash
-BASELINE_RUN=baseline_seed0_2
+BASELINE_RUN=baseline_seed0_3
 SPLIT_NAME=random_patient_5pct_seed0
 UNLEARN_RUN=unlearn_5pct_seed0
 RETRAIN_RUN=retrain_retain_5pct_seed0
@@ -110,7 +110,7 @@ python src/unlearning/train.py \
   --data_dir data \
   --checkpoint "run/$BASELINE_RUN/ckpts/THERAPI_aligner_GDSC_TCGA.pt" \
   --split-dir "splits/$SPLIT_NAME" \
-  --output-dir "run/$UNLEARN_RUN/ckpts" \
+  --output-dir "run/$UNLEARN_RUN" \
   --device "$DEVICE" \
   --original-train-seed 0 \
   --unlearn-seed 0 \
@@ -144,7 +144,7 @@ gradient clipping은 `src/unlearning/train.py`에서 다음 줄이 주석 처리
 python src/unlearning/retrain.py \
   --data_dir data \
   --split-dir "splits/$SPLIT_NAME" \
-  --output-dir "run/$RETRAIN_RUN/ckpts" \
+  --output-dir "run/$RETRAIN_RUN" \
   --device "$DEVICE" \
   --seed 0
 ```
@@ -157,6 +157,10 @@ run/retrain_retain_5pct_seed0/ckpts/history.csv
 ```
 
 이 모델은 unlearning 결과가 근접해야 하는 deletion-retraining reference다.
+
+두 학습 스크립트의 `--output-dir`에는 run 디렉터리 또는 그 아래의 `ckpts`
+디렉터리를 줄 수 있다. `run/<RUN_NAME>`을 주면 스크립트가 `ckpts`를 자동으로
+추가하며, `run/<RUN_NAME>/ckpts`를 직접 주어도 중복으로 추가하지 않는다.
 
 ## 5. Pipeline이 찾는 aligner 이름 연결
 

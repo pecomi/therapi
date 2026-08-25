@@ -148,6 +148,10 @@ python src/unlearning/train.py \
   --lr 1e-5
 ```
 
+`--output-dir`에는 run 디렉터리를 지정한다. 체크포인트와 unlearning 로그는
+자동으로 그 아래의 `ckpts/`에 저장된다. 이미 `.../ckpts`를 지정한 경우에는
+`ckpts`가 중복으로 추가되지 않는다.
+
 The minimized objective is the negative TCGA forget alignment loss:
 `-(0.2 * reconstruction + 0.4 * classification + 0.8 * center)`.  Every module
 on this target-loss backpropagation route is updated: the GDSC source encoder,

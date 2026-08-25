@@ -206,7 +206,14 @@ def _gradient_norm(parameters) -> float:
 def unlearn(args: argparse.Namespace) -> None:
     device = torch.device(args.device)
     data_dir = Path(args.data_dir)
-    output_dir = Path(args.output_dir)
+    requested_output = Path(args.output_dir)
+    # Accept either a run directory or its ckpts directory.  Model artifacts
+    # always live under ckpts, matching pipline.sh's run layout.
+    output_dir = (
+        requested_output
+        if requested_output.name.lower() == "ckpts"
+        else requested_output / "ckpts"
+    )
     output_dir.mkdir(parents=True, exist_ok=True)
 
     source_gex_df = pd.read_csv(data_dir / args.source / f"{args.source}_gex.csv", index_col=0)
