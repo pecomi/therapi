@@ -298,14 +298,17 @@ python -c 'import torch, pandas, rdkit, sklearn; print(torch.cuda.is_available()
 
 ## 10. Forget/retain representation 변화 평가
 
-같은 `TCGA_unlabeled` 환자를 baseline과 unlearned aligner에 통과시켜 환자별
-latent, attention, reconstruction, center distance 변화를 계산한다.
+같은 `TCGA_unlabeled`의 forget/retain 환자를 baseline, unlearned,
+retain-only retrained aligner 세 개에 모두 통과시킨다. 환자별 latent,
+attention, reconstruction, center distance를 비교하고 unlearning이 deletion
+retraining에 가까워졌는지 계산한다.
 
 ```bash
 python src/unlearning/evaluate_representations.py \
   --data_dir data \
   --baseline-checkpoint "run/$BASELINE_RUN/ckpts/THERAPI_aligner_GDSC_TCGA.pt" \
   --unlearned-checkpoint "run/$UNLEARN_RUN/ckpts/THERAPI_aligner_unlearned.pt" \
+  --retrained-checkpoint "run/$RETRAIN_RUN/ckpts/THERAPI_aligner_retrained_retain_only.pt" \
   --split-dir "splits/$SPLIT_NAME" \
   --output-dir "run/$UNLEARN_RUN/evaluation/representations" \
   --device "$DEVICE" \
@@ -330,3 +333,37 @@ forget 환자 평균 latent RMSE / retain 환자 평균 latent RMSE
 이 비율이 1보다 클수록 forget 환자 representation이 상대적으로 더 많이
 변했다. 단, 비율만 보지 말고 retain의 절대 변화량과 center distance,
 attention, reconstruction 변화도 함께 확인한다.
+
+세 모델 비교에서 핵심 열은 다음과 같다.
+
+```text
+*_baseline_unlearned
+  원본과 unlearned 사이 거리
+
+*_baseline_retrained
+  원본과 삭제 후 재학습 모델 사이 거리
+
+*_unlearned_retrained
+  unlearned와 삭제 후 재학습 모델 사이 거리
+
+*_improvement_to_retrained
+  baseline-retrained 거리 - unlearned-retrained 거리
+```
+
+`*_improvement_to_retrained`이 양수이면 unlearning이 해당 지표에서 원본보다
+retain-only retrained 모델에 가까워졌다는 뜻이다. 이 값을 forget과 retain에서
+각각 확인한다.
+
+```text
+forget:
+  improvement_to_retrained > 0 이 주요 목표
+
+retain:
+  baseline_unlearned 거리가 작아야 함
+  retain utility가 유지되는지도 함께 확인
+```
+
+Raw latent는 retraining 과정에서 좌표계가 달라질 수 있으므로 참고 지표로
+사용한다. center distance, tissue 정답 확률, attention 분포,
+reconstruction output처럼 기능적 출력의 `improvement_to_retrained`을 더
+중요하게 해석한다.

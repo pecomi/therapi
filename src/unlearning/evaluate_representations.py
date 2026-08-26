@@ -1,4 +1,4 @@
-"""Compare baseline and unlearned THERAPI representations on TCGA-unlabeled."""
+"""Compare baseline, unlearned, and retain-only retrained THERAPI aligners."""
 
 from __future__ import annotations
 
@@ -78,27 +78,9 @@ def _js_divergence(p: torch.Tensor, q: torch.Tensor) -> torch.Tensor:
     )
 
 
-def _group_summary(frame: pd.DataFrame, unit: str) -> pd.DataFrame:
-    metrics = [
-        "latent_rmse",
-        "latent_mae",
-        "latent_cosine",
-        "attention_mae",
-        "attention_js",
-        "wgex_rmse",
-        "reconstruction_mse_baseline",
-        "reconstruction_mse_unlearned",
-        "reconstruction_mse_delta",
-        "center_distance_baseline",
-        "center_distance_unlearned",
-        "center_distance_delta",
-        "emb_true_probability_baseline",
-        "emb_true_probability_unlearned",
-        "emb_true_probability_delta",
-        "exp_true_probability_baseline",
-        "exp_true_probability_unlearned",
-        "exp_true_probability_delta",
-    ]
+def _group_summary(
+    frame: pd.DataFrame, unit: str, metrics: list[str]
+) -> pd.DataFrame:
     summary = frame.groupby("assignment")[metrics].agg(
         ["count", "mean", "median", "std", "max"]
     )
@@ -132,6 +114,14 @@ def evaluate(args: argparse.Namespace) -> None:
     )
     # This also verifies row order, patient leakage, and non-empty assignments.
     forget_indices, retain_indices = load_manifest_indices(samples, args.split_dir)
+    # build_sample_table contains audited sample metadata but not the saved
+    # assignment. load_manifest_indices validates the manifest and returns its
+    # exact row positions, so attach those assignments for group summaries.
+    samples = samples.copy()
+    samples["assignment"] = "retain"
+    samples.loc[samples["row_index"].isin(forget_indices), "assignment"] = "forget"
+    if int((samples["assignment"] == "forget").sum()) != len(forget_indices):
+        raise AssertionError("failed to attach all forget assignments to sample metadata")
 
     n_tissue = int(source_info["tissue_label"].nunique())
     source_dataset = AlignerDataset(
@@ -150,15 +140,24 @@ def evaluate(args: argparse.Namespace) -> None:
     )
     baseline, baseline_center_source = _load_aligner(args.baseline_checkpoint, **common)
     unlearned, unlearned_center_source = _load_aligner(args.unlearned_checkpoint, **common)
+    retrained, retrained_center_source = _load_aligner(args.retrained_checkpoint, **common)
     b_source, b_target, b_emb, b_exp, b_center = baseline
     u_source, u_target, u_emb, u_exp, u_center = unlearned
+    r_source, r_target, r_emb, r_exp, r_center = retrained
 
-    center_max_abs_diff = (
+    center_max_abs_diff_baseline_unlearned = (
         b_center.centers.detach() - u_center.centers.detach()
     ).abs().max().item()
+    center_max_abs_diff_baseline_retrained = (
+        b_center.centers.detach() - r_center.centers.detach()
+    ).abs().max().item()
+    center_max_abs_diff = max(
+        center_max_abs_diff_baseline_unlearned,
+        center_max_abs_diff_baseline_retrained,
+    )
     if center_max_abs_diff > args.center_tolerance:
         raise ValueError(
-            "baseline and unlearned centers differ "
+            "the three models do not share fixed centers "
             f"(max_abs_diff={center_max_abs_diff:.8g}); comparison would mix center movement "
             "with representation movement"
         )
@@ -166,6 +165,7 @@ def evaluate(args: argparse.Namespace) -> None:
     source_gex = source_dataset.data.to(device)
     baseline_source_z = b_source.encoder(source_gex)
     unlearned_source_z = u_source.encoder(source_gex)
+    retrained_source_z = r_source.encoder(source_gex)
     loader = DataLoader(
         target_dataset,
         batch_size=args.batch_size,
@@ -187,20 +187,36 @@ def evaluate(args: argparse.Namespace) -> None:
         u_weights, u_latent, u_wgex, u_recon = u_target(
             target_gex, unlearned_source_z, source_gex
         )
+        r_weights, r_latent, r_wgex, r_recon = r_target(
+            target_gex, retrained_source_z, source_gex
+        )
 
         b_emb_prob = F.softmax(b_emb(b_latent), dim=1).gather(1, labels[:, None]).squeeze(1)
         u_emb_prob = F.softmax(u_emb(u_latent), dim=1).gather(1, labels[:, None]).squeeze(1)
         b_exp_prob = F.softmax(b_exp(b_wgex), dim=1).gather(1, labels[:, None]).squeeze(1)
         u_exp_prob = F.softmax(u_exp(u_wgex), dim=1).gather(1, labels[:, None]).squeeze(1)
+        r_emb_prob = F.softmax(r_emb(r_latent), dim=1).gather(1, labels[:, None]).squeeze(1)
+        r_exp_prob = F.softmax(r_exp(r_wgex), dim=1).gather(1, labels[:, None]).squeeze(1)
         b_center_distance = (b_latent - b_center.centers[labels]).pow(2).sum(dim=1)
         u_center_distance = (u_latent - u_center.centers[labels]).pow(2).sum(dim=1)
+        r_center_distance = (r_latent - r_center.centers[labels]).pow(2).sum(dim=1)
 
         collect("latent_rmse", (u_latent - b_latent).pow(2).mean(dim=1).sqrt())
+        collect("latent_rmse_baseline_unlearned", (u_latent - b_latent).pow(2).mean(dim=1).sqrt())
+        collect("latent_rmse_baseline_retrained", (r_latent - b_latent).pow(2).mean(dim=1).sqrt())
+        collect("latent_rmse_unlearned_retrained", (r_latent - u_latent).pow(2).mean(dim=1).sqrt())
         collect("latent_mae", (u_latent - b_latent).abs().mean(dim=1))
         collect("latent_cosine", F.cosine_similarity(b_latent, u_latent, dim=1))
         collect("attention_mae", (u_weights - b_weights).abs().mean(dim=1))
         collect("attention_js", _js_divergence(b_weights, u_weights))
+        collect("attention_js_baseline_unlearned", _js_divergence(b_weights, u_weights))
+        collect("attention_js_baseline_retrained", _js_divergence(b_weights, r_weights))
+        collect("attention_js_unlearned_retrained", _js_divergence(u_weights, r_weights))
         collect("wgex_rmse", (u_wgex - b_wgex).pow(2).mean(dim=1).sqrt())
+        collect("wgex_rmse_baseline_retrained", (r_wgex - b_wgex).pow(2).mean(dim=1).sqrt())
+        collect("wgex_rmse_unlearned_retrained", (r_wgex - u_wgex).pow(2).mean(dim=1).sqrt())
+        collect("reconstruction_output_rmse_baseline_retrained", (r_recon - b_recon).pow(2).mean(dim=1).sqrt())
+        collect("reconstruction_output_rmse_unlearned_retrained", (r_recon - u_recon).pow(2).mean(dim=1).sqrt())
         collect(
             "reconstruction_mse_baseline",
             (b_recon - target_gex).pow(2).mean(dim=1),
@@ -209,12 +225,16 @@ def evaluate(args: argparse.Namespace) -> None:
             "reconstruction_mse_unlearned",
             (u_recon - target_gex).pow(2).mean(dim=1),
         )
+        collect("reconstruction_mse_retrained", (r_recon - target_gex).pow(2).mean(dim=1))
         collect("center_distance_baseline", b_center_distance)
         collect("center_distance_unlearned", u_center_distance)
+        collect("center_distance_retrained", r_center_distance)
         collect("emb_true_probability_baseline", b_emb_prob)
         collect("emb_true_probability_unlearned", u_emb_prob)
+        collect("emb_true_probability_retrained", r_emb_prob)
         collect("exp_true_probability_baseline", b_exp_prob)
         collect("exp_true_probability_unlearned", u_exp_prob)
+        collect("exp_true_probability_retrained", r_exp_prob)
 
     per_sample = samples.copy()
     for name, chunks in collected.items():
@@ -227,6 +247,25 @@ def evaluate(args: argparse.Namespace) -> None:
     ):
         per_sample[f"{stem}_delta"] = (
             per_sample[f"{stem}_unlearned"] - per_sample[f"{stem}_baseline"]
+        )
+
+    # Positive improvement means unlearning moved the functional output closer
+    # to deletion retraining than the original baseline was.
+    for stem in ("center_distance", "emb_true_probability", "exp_true_probability"):
+        per_sample[f"{stem}_distance_baseline_retrained"] = (
+            per_sample[f"{stem}_baseline"] - per_sample[f"{stem}_retrained"]
+        ).abs()
+        per_sample[f"{stem}_distance_unlearned_retrained"] = (
+            per_sample[f"{stem}_unlearned"] - per_sample[f"{stem}_retrained"]
+        ).abs()
+        per_sample[f"{stem}_improvement_to_retrained"] = (
+            per_sample[f"{stem}_distance_baseline_retrained"]
+            - per_sample[f"{stem}_distance_unlearned_retrained"]
+        )
+    for stem in ("latent_rmse", "attention_js", "wgex_rmse", "reconstruction_output_rmse"):
+        per_sample[f"{stem}_improvement_to_retrained"] = (
+            per_sample[f"{stem}_baseline_retrained"]
+            - per_sample[f"{stem}_unlearned_retrained"]
         )
 
     numeric_metrics = [
@@ -246,28 +285,44 @@ def evaluate(args: argparse.Namespace) -> None:
     patient_metrics = per_sample.groupby("patient_id", sort=True)[numeric_metrics].mean()
     per_patient = patient_metadata.join(patient_metrics).reset_index()
 
-    sample_summary = _group_summary(per_sample, "sample")
-    patient_summary = _group_summary(per_patient, "patient")
+    sample_summary = _group_summary(per_sample, "sample", numeric_metrics)
+    patient_summary = _group_summary(per_patient, "patient", numeric_metrics)
     group_summary = pd.concat([sample_summary, patient_summary], ignore_index=True)
 
     per_sample.to_csv(output_dir / "representation_change_per_sample.csv", index=False)
     per_patient.to_csv(output_dir / "representation_change_per_patient.csv", index=False)
     group_summary.to_csv(output_dir / "representation_change_group_summary.csv", index=False)
 
-    patient_means = per_patient.groupby("assignment")[
-        ["latent_rmse", "center_distance_delta", "attention_js", "reconstruction_mse_delta"]
-    ].mean()
+    report_metrics = [
+        "latent_rmse_baseline_unlearned",
+        "latent_rmse_baseline_retrained",
+        "latent_rmse_unlearned_retrained",
+        "latent_rmse_improvement_to_retrained",
+        "center_distance_delta",
+        "center_distance_improvement_to_retrained",
+        "attention_js_baseline_unlearned",
+        "attention_js_baseline_retrained",
+        "attention_js_unlearned_retrained",
+        "attention_js_improvement_to_retrained",
+        "reconstruction_mse_delta",
+        "reconstruction_output_rmse_improvement_to_retrained",
+    ]
+    patient_means = per_patient.groupby("assignment")[report_metrics].mean()
     selectivity_ratio = None
     if {"forget", "retain"}.issubset(patient_means.index):
-        retain_latent = float(patient_means.loc["retain", "latent_rmse"])
+        retain_latent = float(
+            patient_means.loc["retain", "latent_rmse_baseline_unlearned"]
+        )
         selectivity_ratio = (
-            float(patient_means.loc["forget", "latent_rmse"]) / retain_latent
+            float(patient_means.loc["forget", "latent_rmse_baseline_unlearned"])
+            / retain_latent
             if retain_latent != 0
             else None
         )
     summary = {
         "baseline_checkpoint": str(Path(args.baseline_checkpoint).resolve()),
         "unlearned_checkpoint": str(Path(args.unlearned_checkpoint).resolve()),
+        "retrained_checkpoint": str(Path(args.retrained_checkpoint).resolve()),
         "split_dir": str(Path(args.split_dir).resolve()),
         "n_forget_samples": len(forget_indices),
         "n_retain_samples": len(retain_indices),
@@ -275,7 +330,10 @@ def evaluate(args: argparse.Namespace) -> None:
         "n_retain_patients": int((per_patient["assignment"] == "retain").sum()),
         "baseline_center_source": baseline_center_source,
         "unlearned_center_source": unlearned_center_source,
+        "retrained_center_source": retrained_center_source,
         "center_max_abs_diff": center_max_abs_diff,
+        "center_max_abs_diff_baseline_unlearned": center_max_abs_diff_baseline_unlearned,
+        "center_max_abs_diff_baseline_retrained": center_max_abs_diff_baseline_retrained,
         "latent_rmse_forget_to_retain_ratio": selectivity_ratio,
         "patient_group_means": patient_means.to_dict(orient="index"),
     }
@@ -292,6 +350,7 @@ def evaluate(args: argparse.Namespace) -> None:
     )
     print(
         f"[center] baseline={baseline_center_source} unlearned={unlearned_center_source} "
+        f"retrained={retrained_center_source} "
         f"max_abs_diff={center_max_abs_diff:.8g}"
     )
     print("\n[patient-level means]")
@@ -307,6 +366,7 @@ if __name__ == "__main__":
     parser.add_argument("--target", default="TCGA")
     parser.add_argument("--baseline-checkpoint", required=True)
     parser.add_argument("--unlearned-checkpoint", required=True)
+    parser.add_argument("--retrained-checkpoint", required=True)
     parser.add_argument("--split-dir", required=True)
     parser.add_argument("--output-dir", required=True)
     parser.add_argument("--device", default="cuda:0")
