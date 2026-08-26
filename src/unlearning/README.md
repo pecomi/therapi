@@ -295,3 +295,38 @@ python -c 'import torch, pandas, rdkit, sklearn; print(torch.cuda.is_available()
 
 각 pipeline 로그의 `[align]` 줄에서 실제로 사용된 checkpoint가 해당 run의
 `THERAPI_aligner_GDSC_TCGA.pt`인지 반드시 확인한다.
+
+## 10. Forget/retain representation 변화 평가
+
+같은 `TCGA_unlabeled` 환자를 baseline과 unlearned aligner에 통과시켜 환자별
+latent, attention, reconstruction, center distance 변화를 계산한다.
+
+```bash
+python src/unlearning/evaluate_representations.py \
+  --data_dir data \
+  --baseline-checkpoint "run/$BASELINE_RUN/ckpts/THERAPI_aligner_GDSC_TCGA.pt" \
+  --unlearned-checkpoint "run/$UNLEARN_RUN/ckpts/THERAPI_aligner_unlearned.pt" \
+  --split-dir "splits/$SPLIT_NAME" \
+  --output-dir "run/$UNLEARN_RUN/evaluation/representations" \
+  --device "$DEVICE" \
+  --original-train-seed 0
+```
+
+출력 파일:
+
+```text
+representation_change_per_sample.csv
+representation_change_per_patient.csv
+representation_change_group_summary.csv
+representation_change_summary.json
+```
+
+터미널에는 forget/retain의 환자 단위 평균과 다음 선택성 비율이 출력된다.
+
+```text
+forget 환자 평균 latent RMSE / retain 환자 평균 latent RMSE
+```
+
+이 비율이 1보다 클수록 forget 환자 representation이 상대적으로 더 많이
+변했다. 단, 비율만 보지 말고 retain의 절대 변화량과 center distance,
+attention, reconstruction 변화도 함께 확인한다.
