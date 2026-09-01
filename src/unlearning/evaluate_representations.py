@@ -278,8 +278,16 @@ def evaluate(args: argparse.Namespace) -> None:
         collect("attention_js_baseline_retrained", _js_divergence(b_weights, r_weights))
         collect("attention_js_unlearned_retrained", _js_divergence(u_weights, r_weights))
         collect("wgex_rmse", (u_wgex - b_wgex).pow(2).mean(dim=1).sqrt())
+        collect(
+            "wgex_rmse_baseline_unlearned",
+            (u_wgex - b_wgex).pow(2).mean(dim=1).sqrt(),
+        )
         collect("wgex_rmse_baseline_retrained", (r_wgex - b_wgex).pow(2).mean(dim=1).sqrt())
         collect("wgex_rmse_unlearned_retrained", (r_wgex - u_wgex).pow(2).mean(dim=1).sqrt())
+        collect(
+            "reconstruction_output_rmse_baseline_unlearned",
+            (u_recon - b_recon).pow(2).mean(dim=1).sqrt(),
+        )
         collect("reconstruction_output_rmse_baseline_retrained", (r_recon - b_recon).pow(2).mean(dim=1).sqrt())
         collect("reconstruction_output_rmse_unlearned_retrained", (r_recon - u_recon).pow(2).mean(dim=1).sqrt())
         collect(

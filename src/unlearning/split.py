@@ -266,8 +266,25 @@ def load_manifest_indices(
     samples: pd.DataFrame, manifest_dir: str | Path
 ) -> tuple[list[int], list[int]]:
     """Validate a saved split against current data and return row indices."""
-    manifest = pd.read_csv(Path(manifest_dir) / "samples.csv")
-    required = {"row_index", "sample_id", "patient_id", "assignment"}
+    manifest_dir = Path(manifest_dir)
+    manifest_path = manifest_dir / "samples.csv"
+    metadata_path = manifest_dir / "metadata.json"
+    if not metadata_path.is_file():
+        raise FileNotFoundError(f"split metadata is missing: {metadata_path}")
+    with metadata_path.open(encoding="utf-8") as handle:
+        metadata = json.load(handle)
+    expected_hash = metadata.get("samples_sha256")
+    if not expected_hash:
+        raise KeyError("split metadata is missing 'samples_sha256'")
+    actual_hash = _sha256(manifest_path)
+    if actual_hash != expected_hash:
+        raise ValueError(
+            "samples.csv checksum differs from metadata.json; regenerate the split "
+            "or restore the original manifest"
+        )
+
+    manifest = pd.read_csv(manifest_path)
+    required = {"row_index", "sample_id", "patient_id", "tissue_label", "assignment"}
     missing = required - set(manifest.columns)
     if missing:
         raise KeyError(f"split manifest is missing columns: {sorted(missing)}")
@@ -279,6 +296,10 @@ def load_manifest_indices(
     recorded = manifest[["row_index", "sample_id", "patient_id"]].astype(dtypes)
     if not current.equals(recorded):
         raise ValueError("split manifest no longer matches the current TCGA GEX row order")
+    current_tissue = samples["tissue_label"].astype(str).reset_index(drop=True)
+    recorded_tissue = manifest["tissue_label"].astype(str).reset_index(drop=True)
+    if not current_tissue.equals(recorded_tissue):
+        raise ValueError("split manifest tissue labels no longer match the current TCGA metadata")
     if not set(manifest["assignment"]).issubset({"forget", "retain"}):
         raise ValueError("manifest assignment must contain only 'forget' and 'retain'")
 

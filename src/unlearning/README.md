@@ -42,7 +42,8 @@ split을 학습 스크립트 안에서 다시 추출하면 실험 간 forget 환
   gradient를 누적해 epoch당 한 번 update한다. `--step-mode mini`는 일반
   train loop처럼 mini-batch마다 update한다.
 - gradient clipping은 기본적으로 끈다(`--max-grad-norm 0`). 필요할 때만 양수로 켠다.
-- forget 전체의 평가 loss가 plateau에 도달하면 자동 종료한다.
+- forget 전체의 평가 loss가 baseline보다 실제로 상승한 뒤, 최근 구간의 기울기와
+  변동폭이 모두 작은 plateau에 도달하면 자동 종료한다.
 
 ## 1. Patient-level forget/retain split 생성
 
@@ -79,7 +80,7 @@ splits/random_patient_5pct_seed0/
 다시 돌릴 필요가 없다.
 
 ```text
-run/baseline_seed0_2/ckpts/THERAPI_aligner_GDSC_TCGA.pt
+run/baseline_seed0_3/ckpts/THERAPI_aligner_GDSC_TCGA.pt
 ```
 
 처음부터 baseline 전체 pipeline을 실행해야 한다면:
@@ -121,7 +122,10 @@ python src/unlearning/gradient_ascent.py \
   --epochs 100 \
   --min-epochs 10 \
   --patience 5 \
-  --plateau-rtol 1e-3
+  --plateau-window 5 \
+  --min-forget-rise-rtol 1e-2 \
+  --plateau-rtol 1e-3 \
+  --plateau-range-rtol 5e-3
 ```
 
 출력:
@@ -174,18 +178,38 @@ unlearned가 같은 기준으로 비교되고 gradient ascent가 실제 원본 �
 
 `history.csv`와 `loss_curve.png`의 값은 noisy mini-batch loss가 아니라 매
 epoch update 후 forget/retain 전체에서 다시 계산한 sample-weighted 평균이다.
-epoch 0은 baseline이다. 다음 조건이 모두 만족되면 종료한다.
+epoch 0은 baseline이다. 기본 설정에서는 최근 5개 평가 loss에 직선을 적합해
+정규화된 절대 기울기와 구간 변동폭을 계산한다. 다음 조건이 모두 만족된 상태가
+`patience` epoch 연속 유지되면 종료한다.
 
 ```text
 epoch >= min_epochs
-abs(L_t - L_{t-1}) / max(abs(L_{t-1}), 1e-12) <= plateau_rtol
-위 조건이 patience epoch 연속 유지
+(L_t - L_0) / max(abs(L_0), 1e-12) >= min_forget_rise_rtol
+abs(window slope) / max(abs(L_0), 1e-12) <= plateau_rtol
+(window max - window min) / max(abs(L_0), 1e-12)
+    <= plateau_range_rtol
+위 조건들이 patience epoch 연속 유지
 ```
 
-즉 loss가 상승한 뒤 상대 변화가 충분히 작게 유지되는 첫 plateau의 끝을
-선택한다. 점선이 선택 epoch이다. plateau가 없으면 `--epochs`가 선택된다.
-실험 전에는 `--epochs 100 --patience 0`으로 곡선을 먼저 얻고, 곡선의 noise
-크기에 맞춰 `plateau-rtol`을 정한 뒤 자동 종료를 켜는 방식도 권장한다.
+즉 baseline 대비 의미 있는 상승이 먼저 확인되고, 단일 epoch의 우연한 작은
+변화가 아니라 최근 구간 전체가 평평해진 첫 지점을 선택한다. `loss_curve.png`의
+세 번째 패널은 window slope/range와 각 threshold를 표시하고, 검은 점선은 선택
+epoch이다. `history.csv`에도 `relative_forget_rise_from_baseline`,
+`plateau_window_relative_slope`, `plateau_window_relative_range`,
+`plateau_eligible`이 기록된다.
+
+중요하게, 이 목적함수의 MSE와 cross entropy는 위로 유계가 아니다. 따라서 순수
+gradient ascent가 수학적으로 특정 loss 값에 수렴한다고 보장할 수 없고, 실제
+곡선이 계속 상승하거나 폭발하면 plateau를 억지로 선택하면 안 된다. plateau가
+없으면 마지막 checkpoint와 곡선은 진단용으로 저장하지만 `summary.json`의
+`selection_valid`는 `false`, `stop_reason`은 `max_epochs`가 된다. 이 경우 해당
+checkpoint를 최종 unlearning 결과로 간주하지 말고 learning rate, clipping 또는
+retain utility 제약을 포함한 별도 실험 설계를 검토한다.
+
+처음에는 `--epochs 100 --patience 0`으로 전체 곡선을 얻는 것을 권장한다. 그
+곡선에서 baseline 대비 상승 폭과 plateau 구간의 noise를 확인한 뒤
+`min-forget-rise-rtol`, `plateau-rtol`, `plateau-range-rtol`을 정하고 자동 종료를
+켠다. 기본값 1%, 0.1%, 0.5%는 시작점일 뿐 데이터별 보편적 최적값은 아니다.
 retain loss가 급격히 함께 증가한다면 forget loss의 plateau만으로 좋은
 unlearning이라고 해석하면 안 된다.
 
@@ -309,7 +333,7 @@ run/<RUN_NAME>/output/THERAPI_test_TCGA.csv
 ## 8. 최종 비교 대상
 
 ```text
-run/baseline_seed0_2/output/THERAPI_test_TCGA.csv
+run/baseline_seed0_3/output/THERAPI_test_TCGA.csv
 run/unlearn_5pct_seed0/output/THERAPI_test_TCGA.csv
 run/retrain_retain_5pct_seed0/output/THERAPI_test_TCGA.csv
 ```
