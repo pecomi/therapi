@@ -4,7 +4,7 @@
 정리한다.
 
 1. **Baseline**: 전체 TCGA로 학습한 원본 aligner
-2. **Unlearned**: baseline에 forget-only gradient ascent를 한 번 적용
+2. **Unlearned**: baseline에 forget-only gradient ascent를 여러 epoch 적용
 3. **Retrained**: forget 환자를 처음부터 제외하고 다시 학습한 기준 모델
 
 모든 명령은 THERAPI 프로젝트 루트에서 실행한다.
@@ -36,11 +36,13 @@ split을 학습 스크립트 안에서 다시 추출하면 실험 간 forget 환
 
 - retain 데이터는 unlearning backpropagation에 사용하지 않는다.
 - center loss는 사용하지만 center parameter 자체는 고정한다.
-- source/target decoder parameter는 고정한다.
-- source encoder, target Q/K, 두 tissue classifier는 업데이트한다.
-- 모든 forget mini-batch의 평균 gradient를 누적한 뒤
-  `optimizer.step()`을 정확히 한 번 실행한다.
-- 초기 폭발 여부를 보기 위해 gradient clipping은 주석 처리되어 있다.
+- source decoder와 center anchor는 고정한다. target loss 경로에 있는 source
+  encoder, target Q/K/decoder, 두 tissue classifier는 업데이트한다.
+- 기본 `--step-mode full`은 모든 forget micro-batch의 sample-weighted 평균
+  gradient를 누적해 epoch당 한 번 update한다. `--step-mode mini`는 일반
+  train loop처럼 mini-batch마다 update한다.
+- gradient clipping은 기본적으로 끈다(`--max-grad-norm 0`). 필요할 때만 양수로 켠다.
+- forget 전체의 평가 loss가 plateau에 도달하면 자동 종료한다.
 
 ## 1. Patient-level forget/retain split 생성
 
@@ -106,7 +108,7 @@ bash pipline.sh
 원본 baseline checkpoint에서 시작한다.
 
 ```bash
-python src/unlearning/train.py \
+python src/unlearning/gradient_ascent.py \
   --data_dir data \
   --checkpoint "run/$BASELINE_RUN/ckpts/THERAPI_aligner_GDSC_TCGA.pt" \
   --split-dir "splits/$SPLIT_NAME" \
@@ -114,7 +116,12 @@ python src/unlearning/train.py \
   --device "$DEVICE" \
   --original-train-seed 0 \
   --unlearn-seed 0 \
-  --lr 1e-5
+  --step-mode full \
+  --lr 1e-5 \
+  --epochs 100 \
+  --min-epochs 10 \
+  --patience 5 \
+  --plateau-rtol 1e-3
 ```
 
 출력:
@@ -123,16 +130,67 @@ python src/unlearning/train.py \
 run/unlearn_5pct_seed0/ckpts/THERAPI_aligner_unlearned.pt
 run/unlearn_5pct_seed0/ckpts/history.csv
 run/unlearn_5pct_seed0/ckpts/summary.json
+run/unlearn_5pct_seed0/ckpts/loss_curve.png
 ```
 
-gradient clipping은 `src/unlearning/train.py`에서 다음 줄이 주석 처리된
-상태다.
+### Batch 선택 근거
 
-```python
-# torch.nn.utils.clip_grad_norm_(trainable, args.max_grad_norm)
+후보는 (1) forget sample마다 step, (2) 일반 mini-batch마다 step, (3) forget
+전체 평균 gradient로 epoch마다 한 step이다. (1)은 잡음이 매우 크다. 기본값인
+`--step-mode full`은 (3)이며, forget 전체를 GPU에 한 번에 올리지 않고
+`--batch-size 64` micro-batch로 나눠 gradient를 누적한다. 이 모드에서는
+`batch-size`가 주로 메모리/속도만 바꾸고 effective batch는 forget 전체다.
+
+일반 train loop와 같은 stochastic ascent가 필요하면 (2)를 선택한다.
+
+```bash
+python src/unlearning/gradient_ascent.py \
+  ... \
+  --step-mode mini \
+  --batch-size 128
 ```
 
-폭발 여부를 확인한 뒤 clipping 실험을 추가할 때만 주석을 해제한다.
+이 모드에서는 각 mini-batch 직후 `optimizer.step()`을 실행한다. 따라서 batch
+크기와 shuffle 순서가 Adam의 경로 및 epoch당 update 수를 바꾼다. 종료용
+forget/retain loss는 두 모드 모두 epoch이 끝난 뒤 shuffle 없이 전체 set에서
+다시 계산한다. mini 모드의 곡선이 진동하면 `--patience 10`처럼 확인 구간을
+늘리는 것을 권장한다.
+
+### Loss와 종료 epoch
+
+학습과 평가에는 원본 aligner의 target objective를 그대로 쓴다.
+
+```text
+L = 0.2 * reconstruction MSE
+  + 0.4 * (latent tissue CE + expression tissue CE)
+  + 0.8 * center loss
+```
+
+gene expression은 연속값이고 원본 학습도 reconstruction MSE를 사용하므로
+MSE를 유지한다. CE는 tissue 판별 정보, center loss는 같은 tissue latent의
+응집도를 측정한다. 이 세 항의 가중합을 그대로 사용해야 baseline, retrained,
+unlearned가 같은 기준으로 비교되고 gradient ascent가 실제 원본 학습 목적의
+역방향이 된다.
+
+`history.csv`와 `loss_curve.png`의 값은 noisy mini-batch loss가 아니라 매
+epoch update 후 forget/retain 전체에서 다시 계산한 sample-weighted 평균이다.
+epoch 0은 baseline이다. 다음 조건이 모두 만족되면 종료한다.
+
+```text
+epoch >= min_epochs
+abs(L_t - L_{t-1}) / max(abs(L_{t-1}), 1e-12) <= plateau_rtol
+위 조건이 patience epoch 연속 유지
+```
+
+즉 loss가 상승한 뒤 상대 변화가 충분히 작게 유지되는 첫 plateau의 끝을
+선택한다. 점선이 선택 epoch이다. plateau가 없으면 `--epochs`가 선택된다.
+실험 전에는 `--epochs 100 --patience 0`으로 곡선을 먼저 얻고, 곡선의 noise
+크기에 맞춰 `plateau-rtol`을 정한 뒤 자동 종료를 켜는 방식도 권장한다.
+retain loss가 급격히 함께 증가한다면 forget loss의 plateau만으로 좋은
+unlearning이라고 해석하면 안 된다.
+
+gradient가 실제로 발산해 non-finite가 되면 즉시 실패시킨다. clipping 비교가
+필요한 경우에만 예를 들어 `--max-grad-norm 1.0`을 지정한다.
 
 ## 4. Retain-only deletion retraining
 
@@ -322,7 +380,32 @@ representation_change_per_sample.csv
 representation_change_per_patient.csv
 representation_change_group_summary.csv
 representation_change_summary.json
+loss_metrics.csv
+representation_similarity.csv
 ```
+
+`loss_metrics.csv`는 baseline/unlearned/retrained 각각에 대해 forget/retain의
+평균 `task`, reconstruction MSE, 두 CE, center loss를 같은 함수로 계산한다.
+`unit=sample`은 모든 sample에 같은 가중치를 주고, `unit=patient`는 환자 내
+sample을 먼저 평균내어 sample 수가 많은 환자의 영향이 커지지 않게 한다.
+
+`representation_similarity.csv`에는 latent에 대한 다음 두 지표가 sample과
+patient 수준으로 기록된다.
+
+- **Linear CKA**: 동일 sample의 representation geometry 유사도다. 1에
+  가까울수록 두 모델이 sample 사이 관계를 비슷하게 보존한다. 좌표의 직교
+  회전과 isotropic scale에 비교적 강하므로 retraining으로 latent 좌표계가
+  바뀌어도 직접 RMSE보다 안정적이다.
+- **Fréchet latent distance**: latent를 Gaussian으로 근사해 평균과 공분산의
+  차이를 측정한 FID/FCD 방식의 거리다. 0에 가까울수록 분포가 비슷하다.
+  이미지 feature가 아니므로 엄밀히는 FID라 부르지 않고
+  `frechet_latent_distance`로 기록한다. 특히 FCD(Fréchet ChemNet Distance)는
+  생성 분자의 ChemNet feature용 지표인데 이 aligner는 분자를 생성하지 않으므로
+  그대로 적용하는 것은 부적절하다. Gaussian 가정과 표본 수에 민감하므로 CKA
+  및 task loss와 함께 해석한다.
+
+핵심 비교는 forget에서 `unlearned_vs_retrained`의 CKA가 커지고 Fréchet
+distance가 작아지는지, retain에서 `baseline_vs_unlearned`가 잘 보존되는지다.
 
 터미널에는 forget/retain의 환자 단위 평균과 다음 선택성 비율이 출력된다.
 

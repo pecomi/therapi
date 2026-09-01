@@ -137,7 +137,7 @@ not resample patients inside a training script.
 Run forget-only gradient ascent from an original aligner checkpoint:
 
 ```bash
-python src/unlearning/train.py \
+python src/unlearning/gradient_ascent.py \
   --data_dir data \
   --checkpoint run/baseline_seed0/ckpts/THERAPI_aligner_GDSC_TCGA.pt \
   --split-dir splits/random_patient_5pct_seed0 \
@@ -145,7 +145,12 @@ python src/unlearning/train.py \
   --device cuda:0 \
   --original-train-seed 0 \
   --unlearn-seed 0 \
-  --lr 1e-5
+  --step-mode full \
+  --lr 1e-5 \
+  --epochs 100 \
+  --min-epochs 10 \
+  --patience 5 \
+  --plateau-rtol 1e-3
 ```
 
 `--output-dir`에는 run 디렉터리를 지정한다. 체크포인트와 unlearning 로그는
@@ -155,12 +160,16 @@ python src/unlearning/train.py \
 The minimized objective is the negative TCGA forget alignment loss:
 `-(0.2 * reconstruction + 0.4 * classification + 0.8 * center)`.  Every module
 on this target-loss backpropagation route is updated: the GDSC source encoder,
-the target Q/K attention encoder, and both tissue classifiers.  The source and
-target reconstruction decoders are frozen.  Retain data is never used for an
-optimizer update; its metrics are reported for evaluation only. Gradients are
-accumulated over every forget mini-batch and `optimizer.step()` is called
-exactly once. Gradient clipping is intentionally commented out in
-`src/unlearning/train.py` for the initial explosion-observation experiment.
+the target Q/K attention encoder and decoder, and both tissue classifiers. The
+source decoder has no target-loss gradient and stays frozen. Retain data is
+never used for an optimizer update; its metrics are reported for evaluation
+only. `--step-mode full` accumulates the exact forget-set mean and steps once
+per epoch; `--step-mode mini` performs a stochastic ascent step after every
+mini-batch. Epochs repeat until the evaluated full-forget loss reaches a
+sustained relative-change plateau or `--epochs` is reached. `history.csv` and
+`loss_curve.png` record full forget/retain means from epoch 0 onward. Gradient
+clipping is off by default and can be enabled with a positive
+`--max-grad-norm`.
 
 The original trainer used fixed random center anchors because `CenterLoss`
 parameters were not part of its optimizer.  New original checkpoints save

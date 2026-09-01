@@ -25,6 +25,7 @@ from model import (
     SOURCE_AE,
     TARGET_weightencoder,
 )
+from unlearning.objective import per_sample_alignment_losses
 from unlearning.split import build_sample_table, load_manifest_indices
 from utils import set_seed
 
@@ -87,6 +88,34 @@ def _group_summary(
     summary.columns = [f"{metric}_{stat}" for metric, stat in summary.columns]
     summary.insert(0, "unit", unit)
     return summary.reset_index()
+
+
+def _linear_cka(x: np.ndarray, y: np.ndarray) -> float:
+    """Linear CKA for paired samples without constructing n-by-n Gram matrices."""
+    x = x.astype(np.float64) - x.mean(axis=0, keepdims=True)
+    y = y.astype(np.float64) - y.mean(axis=0, keepdims=True)
+    numerator = np.linalg.norm(x.T @ y, ord="fro") ** 2
+    denominator = np.linalg.norm(x.T @ x, ord="fro") * np.linalg.norm(y.T @ y, ord="fro")
+    return float(numerator / denominator) if denominator > 0 else float("nan")
+
+
+def _psd_sqrt(matrix: np.ndarray) -> np.ndarray:
+    values, vectors = np.linalg.eigh((matrix + matrix.T) / 2)
+    return (vectors * np.sqrt(np.clip(values, 0, None))) @ vectors.T
+
+
+def _frechet_distance(x: np.ndarray, y: np.ndarray, eps: float) -> float:
+    """FID-style Gaussian distance between two latent distributions."""
+    mean_x, mean_y = x.mean(axis=0), y.mean(axis=0)
+    cov_x = np.atleast_2d(np.cov(x, rowvar=False))
+    cov_y = np.atleast_2d(np.cov(y, rowvar=False))
+    identity = np.eye(cov_x.shape[0])
+    cov_x, cov_y = cov_x + eps * identity, cov_y + eps * identity
+    root_x = _psd_sqrt(cov_x)
+    trace_cross = np.trace(_psd_sqrt(root_x @ cov_y @ root_x))
+    distance = (mean_x - mean_y) @ (mean_x - mean_y)
+    distance += np.trace(cov_x) + np.trace(cov_y) - 2 * trace_cross
+    return float(max(distance, 0.0))
 
 
 @torch.no_grad()
@@ -174,6 +203,9 @@ def evaluate(args: argparse.Namespace) -> None:
     )
 
     collected: dict[str, list[np.ndarray]] = {}
+    latent_chunks: dict[str, list[np.ndarray]] = {
+        "baseline": [], "unlearned": [], "retrained": []
+    }
 
     def collect(name: str, value: torch.Tensor) -> None:
         collected.setdefault(name, []).append(value.detach().cpu().numpy())
@@ -191,15 +223,48 @@ def evaluate(args: argparse.Namespace) -> None:
             target_gex, retrained_source_z, source_gex
         )
 
-        b_emb_prob = F.softmax(b_emb(b_latent), dim=1).gather(1, labels[:, None]).squeeze(1)
-        u_emb_prob = F.softmax(u_emb(u_latent), dim=1).gather(1, labels[:, None]).squeeze(1)
-        b_exp_prob = F.softmax(b_exp(b_wgex), dim=1).gather(1, labels[:, None]).squeeze(1)
-        u_exp_prob = F.softmax(u_exp(u_wgex), dim=1).gather(1, labels[:, None]).squeeze(1)
-        r_emb_prob = F.softmax(r_emb(r_latent), dim=1).gather(1, labels[:, None]).squeeze(1)
-        r_exp_prob = F.softmax(r_exp(r_wgex), dim=1).gather(1, labels[:, None]).squeeze(1)
+        b_emb_logits, u_emb_logits, r_emb_logits = b_emb(b_latent), u_emb(u_latent), r_emb(r_latent)
+        b_exp_logits, u_exp_logits, r_exp_logits = b_exp(b_wgex), u_exp(u_wgex), r_exp(r_wgex)
+        b_emb_prob = F.softmax(b_emb_logits, dim=1).gather(1, labels[:, None]).squeeze(1)
+        u_emb_prob = F.softmax(u_emb_logits, dim=1).gather(1, labels[:, None]).squeeze(1)
+        b_exp_prob = F.softmax(b_exp_logits, dim=1).gather(1, labels[:, None]).squeeze(1)
+        u_exp_prob = F.softmax(u_exp_logits, dim=1).gather(1, labels[:, None]).squeeze(1)
+        r_emb_prob = F.softmax(r_emb_logits, dim=1).gather(1, labels[:, None]).squeeze(1)
+        r_exp_prob = F.softmax(r_exp_logits, dim=1).gather(1, labels[:, None]).squeeze(1)
         b_center_distance = (b_latent - b_center.centers[labels]).pow(2).sum(dim=1)
         u_center_distance = (u_latent - u_center.centers[labels]).pow(2).sum(dim=1)
         r_center_distance = (r_latent - r_center.centers[labels]).pow(2).sum(dim=1)
+
+        outputs = {
+            "baseline": (
+                {"recon": b_recon, "latent": b_latent, "emb_logits": b_emb_logits, "exp_logits": b_exp_logits},
+                b_center,
+            ),
+            "unlearned": (
+                {"recon": u_recon, "latent": u_latent, "emb_logits": u_emb_logits, "exp_logits": u_exp_logits},
+                u_center,
+            ),
+            "retrained": (
+                {"recon": r_recon, "latent": r_latent, "emb_logits": r_emb_logits, "exp_logits": r_exp_logits},
+                r_center,
+            ),
+        }
+        for model_name, (output, center) in outputs.items():
+            losses = per_sample_alignment_losses(
+                output,
+                target_gex,
+                labels,
+                center,
+                args.recon_weight,
+                args.class_weight,
+                args.center_weight,
+            )
+            for loss_name, values in losses.items():
+                collect(f"loss_{loss_name}_{model_name}", values)
+        for model_name, latent in (
+            ("baseline", b_latent), ("unlearned", u_latent), ("retrained", r_latent)
+        ):
+            latent_chunks[model_name].append(latent.detach().cpu().numpy())
 
         collect("latent_rmse", (u_latent - b_latent).pow(2).mean(dim=1).sqrt())
         collect("latent_rmse_baseline_unlearned", (u_latent - b_latent).pow(2).mean(dim=1).sqrt())
@@ -289,9 +354,59 @@ def evaluate(args: argparse.Namespace) -> None:
     patient_summary = _group_summary(per_patient, "patient", numeric_metrics)
     group_summary = pd.concat([sample_summary, patient_summary], ignore_index=True)
 
+    loss_rows = []
+    for unit, frame in (("sample", per_sample), ("patient", per_patient)):
+        for assignment, group in frame.groupby("assignment"):
+            for model_name in ("baseline", "unlearned", "retrained"):
+                loss_rows.append({
+                    "unit": unit,
+                    "assignment": assignment,
+                    "model": model_name,
+                    "n": len(group),
+                    **{
+                        name: group[f"loss_{name}_{model_name}"].mean()
+                        for name in ("task", "recon", "emb_class", "exp_class", "center")
+                    },
+                })
+    loss_metrics = pd.DataFrame(loss_rows)
+
+    latents = {name: np.concatenate(chunks) for name, chunks in latent_chunks.items()}
+    patient_assignments = per_sample.groupby("patient_id", sort=True)["assignment"].first()
+    patient_latents = {}
+    for name, values in latents.items():
+        frame = pd.DataFrame(values)
+        frame["patient_id"] = per_sample["patient_id"].to_numpy()
+        patient_latents[name] = frame.groupby("patient_id", sort=True).mean().to_numpy()
+    similarity_rows = []
+    for unit, values, assignments in (
+        ("sample", latents, per_sample["assignment"].to_numpy()),
+        ("patient", patient_latents, patient_assignments.to_numpy()),
+    ):
+        for assignment in ("forget", "retain"):
+            mask = assignments == assignment
+            for left, right in (
+                ("baseline", "unlearned"),
+                ("baseline", "retrained"),
+                ("unlearned", "retrained"),
+            ):
+                x, y = values[left][mask], values[right][mask]
+                similarity_rows.append({
+                    "unit": unit,
+                    "assignment": assignment,
+                    "comparison": f"{left}_vs_{right}",
+                    "n": len(x),
+                    "linear_cka": _linear_cka(x, y),
+                    "frechet_latent_distance": (
+                        _frechet_distance(x, y, args.frechet_eps) if len(x) > 1 else float("nan")
+                    ),
+                })
+    representation_similarity = pd.DataFrame(similarity_rows)
+
     per_sample.to_csv(output_dir / "representation_change_per_sample.csv", index=False)
     per_patient.to_csv(output_dir / "representation_change_per_patient.csv", index=False)
     group_summary.to_csv(output_dir / "representation_change_group_summary.csv", index=False)
+    loss_metrics.to_csv(output_dir / "loss_metrics.csv", index=False)
+    representation_similarity.to_csv(output_dir / "representation_similarity.csv", index=False)
 
     report_metrics = [
         "latent_rmse_baseline_unlearned",
@@ -335,6 +450,11 @@ def evaluate(args: argparse.Namespace) -> None:
         "center_max_abs_diff_baseline_unlearned": center_max_abs_diff_baseline_unlearned,
         "center_max_abs_diff_baseline_retrained": center_max_abs_diff_baseline_retrained,
         "latent_rmse_forget_to_retain_ratio": selectivity_ratio,
+        "loss_weights": {
+            "reconstruction_mse": args.recon_weight,
+            "classification_cross_entropy": args.class_weight,
+            "center": args.center_weight,
+        },
         "patient_group_means": patient_means.to_dict(orient="index"),
     }
     with (output_dir / "representation_change_summary.json").open(
@@ -355,6 +475,10 @@ def evaluate(args: argparse.Namespace) -> None:
     )
     print("\n[patient-level means]")
     print(patient_means.to_string())
+    print("\n[mean losses]")
+    print(loss_metrics.to_string(index=False))
+    print("\n[latent CKA / Frechet distance]")
+    print(representation_similarity.to_string(index=False))
     print(f"\n[selectivity] forget/retain latent RMSE ratio={selectivity_ratio}")
     print(f"[done] results -> {output_dir.resolve()}")
 
@@ -377,4 +501,8 @@ if __name__ == "__main__":
     parser.add_argument("--batch-size", type=int, default=256)
     parser.add_argument("--num-workers", type=int, default=0)
     parser.add_argument("--center-tolerance", type=float, default=1e-7)
+    parser.add_argument("--recon-weight", type=float, default=0.2)
+    parser.add_argument("--class-weight", type=float, default=0.4)
+    parser.add_argument("--center-weight", type=float, default=0.8)
+    parser.add_argument("--frechet-eps", type=float, default=1e-6)
     evaluate(parser.parse_args())
