@@ -306,13 +306,8 @@ def _plot_loss_components(
             reference[f"retrained_forget_{component}"], color=color, linestyle="--",
             label=f"retrained {component} (final)",
         )
-    axes[0].set(
-        title="Weighted task loss (sample mean)", xlabel="ascent epoch", ylabel="loss"
-    )
-    axes[1].set(
-        title="Forget raw loss components (unweighted sample mean)",
-        xlabel="ascent epoch", ylabel="raw loss",
-    )
+    axes[0].set(title="Mean alignment loss (sample mean)", xlabel="ascent epoch", ylabel="loss")
+    axes[1].set(title="Forget loss components (sample mean)", xlabel="ascent epoch", ylabel="loss")
     for axis in axes:
         if loss_scale == "symlog":
             # Preserve a linear neighbourhood around zero while compressing
@@ -328,50 +323,61 @@ def _plot_loss_components(
     plt.close(figure)
 
 
-def _plot_loss_deltas(history: pd.DataFrame, path: Path, title: str) -> None:
-    """Show signed movement from the baseline, with zero kept visible."""
+def _near_zero_limit(values: list[float]) -> float:
+    """A zero-based view containing all baseline/retrained control values."""
+    return max(1e-8, max(values) * 1.25)
+
+
+def _plot_near_zero_losses(history: pd.DataFrame, path: Path, title: str) -> None:
+    """Supplementary linear plots that resolve the initial/control-loss range."""
     import matplotlib
 
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
-    runs = history["run"].drop_duplicates().tolist()
-    figure, axes = plt.subplots(1, 2, figsize=(15, 5))
-    for run_name in runs:
-        curve = history[history["run"] == run_name].sort_values("epoch")
-        baseline = curve.loc[curve["epoch"] == 0].iloc[0]
-        for assignment, color in (("forget", "tab:blue"), ("retain", "tab:orange")):
-            axes[0].plot(
-                curve["epoch"], curve[f"{assignment}_task"] - baseline[f"{assignment}_task"],
-                color=color, label=f"unlearned {assignment} − baseline",
-            )
-        for component, color in zip(COMPONENTS, ("tab:blue", "tab:orange", "tab:green", "tab:red")):
-            axes[1].plot(
-                curve["epoch"], curve[f"forget_{component}"] - baseline[f"forget_{component}"],
-                color=color, label=f"unlearned {component} − baseline",
-            )
-
     reference = history.loc[history["epoch"] == 0].iloc[0]
+    figure, axes = plt.subplots(1, 2, figsize=(15, 5))
+    curve = history[history["run"] == history["run"].iloc[0]].sort_values("epoch")
     for assignment, color in (("forget", "tab:blue"), ("retain", "tab:orange")):
+        axes[0].plot(curve["epoch"], curve[f"{assignment}_task"], color=color, label=assignment)
         axes[0].axhline(
-            reference[f"retrained_{assignment}_task"] - reference[f"baseline_{assignment}_task"],
-            color=color, linestyle="--", label=f"retrained {assignment} − baseline",
+            reference[f"baseline_{assignment}_task"], color=color, linestyle=":",
+            label=f"baseline {assignment} (epoch 0)",
+        )
+        axes[0].axhline(
+            reference[f"retrained_{assignment}_task"], color=color, linestyle="--",
+            label=f"retrained {assignment} (final)",
         )
     for component, color in zip(COMPONENTS, ("tab:blue", "tab:orange", "tab:green", "tab:red")):
+        axes[1].plot(curve["epoch"], curve[f"forget_{component}"], color=color, label=component)
         axes[1].axhline(
-            reference[f"retrained_forget_{component}"] - reference[f"baseline_forget_{component}"],
-            color=color, linestyle="--", label=f"retrained {component} − baseline",
+            reference[f"baseline_forget_{component}"], color=color, linestyle=":",
+            label=f"baseline {component} (epoch 0)",
         )
-    for axis, subtitle in zip(
-        axes,
-        ("Task-loss change from baseline", "Forget-component change from baseline"),
-    ):
-        axis.axhline(0, color="black", linewidth=0.9)
-        axis.set(title=subtitle, xlabel="ascent epoch", ylabel="signed Δ loss")
-        axis.set_yscale("symlog", linthresh=1e-2)
+        axes[1].axhline(
+            reference[f"retrained_forget_{component}"], color=color, linestyle="--",
+            label=f"retrained {component} (final)",
+        )
+    task_controls = [
+        reference[f"{model}_{assignment}_task"]
+        for model in ("baseline", "retrained") for assignment in ("forget", "retain")
+    ]
+    component_controls = [
+        reference[f"{model}_forget_{component}"]
+        for model in ("baseline", "retrained") for component in COMPONENTS
+    ]
+    axes[0].set(
+        title="Mean alignment loss: near-zero view", xlabel="ascent epoch", ylabel="loss",
+        ylim=(0, _near_zero_limit(task_controls)),
+    )
+    axes[1].set(
+        title="Forget components: near-zero view", xlabel="ascent epoch", ylabel="loss",
+        ylim=(0, _near_zero_limit(component_controls)),
+    )
+    for axis in axes:
         axis.grid(alpha=0.25)
         axis.legend()
-    figure.suptitle(f"{title}: baseline-relative loss", y=1.01)
+    figure.suptitle(f"{title}: baseline/retrained neighbourhood", y=1.01)
     figure.tight_layout()
     figure.savefig(path, dpi=180)
     plt.close(figure)
@@ -413,9 +419,9 @@ def main(args: argparse.Namespace) -> None:
                     f"{experiment_label}: {tag}",
                     args.loss_scale,
                 )
-                _plot_loss_deltas(
+                _plot_near_zero_losses(
                     group,
-                    output_dir / f"loss_delta_{_safe_name(experiment_label)}_{_safe_name(tag)}.png",
+                    output_dir / f"loss_near_zero_{_safe_name(experiment_label)}_{_safe_name(tag)}.png",
                     f"{experiment_label}: {tag}",
                 )
     else:
@@ -432,7 +438,7 @@ if __name__ == "__main__":
     parser.add_argument("--output-dir", required=True)
     parser.add_argument("--unit", choices=("patient", "sample"), default="patient")
     parser.add_argument(
-        "--loss-scale", choices=("linear", "log", "symlog"), default="symlog",
-        help="y-axis scale for absolute loss curves; symlog retains a visible zero region",
+        "--loss-scale", choices=("linear", "log", "symlog"), default="log",
+        help="y-axis scale for the original absolute-loss plot",
     )
     main(parser.parse_args())
