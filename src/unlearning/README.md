@@ -160,6 +160,49 @@ epoch 0은 baseline이며, early stopping 없이 지정한 30 epoch을 항상 �
 gradient가 실제로 발산해 non-finite가 되면 즉시 실패시킨다. clipping 비교가
 필요한 경우에만 예를 들어 `--max-grad-norm 1.0`을 지정한다.
 
+### 3-1. Unlearned checkpoint의 retain fine-tuning (30 epochs)
+
+Forget-only gradient ascent가 끝난 checkpoint에 retain recovery 단계를 이어
+붙이려면 다음처럼 실행한다. 이 단계는 unlearned checkpoint에서 시작하며
+retain sample만 optimizer update에 사용한다. Forget sample은 변화 확인을 위한
+evaluation에만 사용된다.
+
+```bash
+RETAIN_FT_RUN=unlearn_5pct_seed0_retain_ft30
+
+python src/unlearning/retain_finetune.py \
+  --data_dir data \
+  --checkpoint "run/$UNLEARN_RUN/ckpts/THERAPI_aligner_GDSC_TCGA.pt" \
+  --split-dir "splits/$SPLIT_NAME" \
+  --output-dir "run/$RETAIN_FT_RUN" \
+  --device "$DEVICE" \
+  --original-train-seed 0 \
+  --finetune-seed 0 \
+  --batch-size 128 \
+  --lr 1e-4 \
+  --epochs 30
+```
+
+기본 loss는 unlearning과 같은 원본 target objective이며, 부호만 반대로 하여
+retain loss를 최소화한다. 현재 `gradient_ascent.py`와 대칭적으로 target Q/K만
+업데이트하고 source encoder, target decoder, 두 classifier, center는 고정한다.
+Early stopping 없이 정확히 30 epoch을 수행한다. 입력 checkpoint를 실수로
+덮어쓰지 않도록 `--output-dir`에는 반드시 별도 run을 지정해야 한다.
+
+출력:
+
+```text
+run/unlearn_5pct_seed0_retain_ft30/ckpts/
+├── THERAPI_aligner_GDSC_TCGA.pt
+├── retain_finetune_history.csv
+└── retain_finetune_summary.json
+```
+
+출력 checkpoint는 기존 aligner checkpoint key를 유지하므로 후속 embedding이나
+`analyze_aligned_representations.py`의 `--unlearned-checkpoint`에 그대로 전달할
+수 있다. `retain_finetune_history.csv`는 epoch 0의 입력 unlearned 상태와 매
+epoch의 forget/retain 전체-set loss 및 Q/K gradient norm을 기록한다.
+
 ## 4. Retain-only deletion retraining
 
 이 실험은 baseline checkpoint를 fine-tuning하지 않는다. 모델을 처음부터
@@ -379,6 +422,46 @@ retain:
 probability 같은 부가 지표는 더 이상 계산하거나 출력하지 않는다. 같은 출력
 디렉터리를 재사용해도 이전 evaluator가 만든 `representation_change_*` 파일은
 평가 성공 후 제거하므로 구버전 지표와 섞이지 않는다.
+
+### 10-1. Original/unlearned aligned representation post-hoc 분석
+
+재학습이나 unlearning 재실행 없이 두 checkpoint의 attention-weighted target
+latent만 비교하려면 다음 명령을 사용한다.
+
+```bash
+python src/unlearning/analyze_aligned_representations.py \
+  --data_dir data \
+  --original-checkpoint "run/$BASELINE_RUN/ckpts/THERAPI_aligner_GDSC_TCGA.pt" \
+  --unlearned-checkpoint "run/$UNLEARN_RUN/ckpts/THERAPI_aligner_GDSC_TCGA.pt" \
+  --split-dir "splits/$SPLIT_NAME" \
+  --output-dir "run/$UNLEARN_RUN/evaluation/aligned_representations" \
+  --device "$DEVICE"
+```
+
+분석 대상은 `TARGET_weightencoder.forward()`의 두 번째 반환값이다.
+
+```text
+target_latent = softmax(Q(target_gex) @ K(source_latent).T / sqrt(latent_dim))
+                @ source_latent
+```
+
+스크립트는 TCGA 전체 DataLoader를 `shuffle=False`로 한 번 순회하면서 같은
+행 순서로 original/unlearned 모델을 평가한다. 다음 파일만 새로 생성한다.
+
+```text
+aligned_representations/
+├── aligned_representations.npz
+├── aligned_representation_similarity.csv
+└── aligned_representation_summary.json
+```
+
+`aligned_representations.npz`에는 `row_index`, `sample_id`, `patient_id`,
+`assignment`, `original`, `unlearned`가 들어 있다. 뒤의 두 행렬은 각각
+`(n_samples, latent_dim)`이고 앞의 식별자 배열과 행 순서가 같다.
+`aligned_representation_similarity.csv`는 기존
+`evaluate_representations.py`의 Linear CKA와 Fréchet latent distance 구현을
+그대로 사용해 sample/patient 단위 forget/retain aggregate를 기록한다. center
+값이나 attention weight 자체의 지표는 계산하지 않는다.
 
 ## 11. Fixed mini-batch center-loss ablation
 
