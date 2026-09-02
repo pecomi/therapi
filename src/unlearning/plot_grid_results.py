@@ -1,10 +1,4 @@
-"""Plot unlearned-versus-retrained metrics and epoch histories for experiment grids.
-
-The script accepts both a flat grid (for example full/mini/center) and a
-nested grid (for example small-LR/<learning-rate>/<run>).  It reads the
-per-run representation-evaluation CSVs and the persisted ``ckpts/history.csv``
-files; it does not rerun training, CSG2A, the predictor, or evaluation.
-"""
+"""Plot the fixed mini-batch center-loss ablation from saved CSVs and histories."""
 
 from __future__ import annotations
 
@@ -24,7 +18,7 @@ METRICS = (
 )
 COMPONENTS = ("recon", "emb_class", "exp_class", "center")
 RUN_PATTERN = re.compile(
-    r"(?P<step_mode>full|mini)_epoch_(?P<epochs>\d+)_recon_[^_]+_class_[^_]+_center_(?P<center>[^_]+)$"
+    r"(?P<step_mode>mini)_epoch_(?P<epochs>\d+).*_center_(?P<center>[^_]+)$"
 )
 
 
@@ -32,7 +26,7 @@ def _parse_grid(value: str) -> tuple[str, Path]:
     label, separator, path = value.partition("=")
     if not separator or not label or not path:
         raise argparse.ArgumentTypeError(
-            "--grid must use LABEL=PATH, for example full_mini=run/ga_full_mini_center_grid_seed0"
+            "--grid must use LABEL=PATH, for example mini_center=run/ga_mini_center_lr1e4_epoch30_seed0"
         )
     return label, Path(path)
 
@@ -41,7 +35,30 @@ def _safe_name(value: str) -> str:
     return re.sub(r"[^A-Za-z0-9_.-]+", "_", value).strip("_")
 
 
-def _run_configuration(run_dir: Path, run_name: str) -> dict[str, object]:
+def _summary_configuration(run_dir: Path, grid_root: Path) -> dict[str, object]:
+    """Find the nearest grid summary and recover a row for ``run_dir``."""
+    for directory in (run_dir, *run_dir.parents):
+        try:
+            directory.relative_to(grid_root)
+        except ValueError:
+            break
+        summary_path = directory / "comparison_summary.csv"
+        if not summary_path.is_file():
+            continue
+        summary = pd.read_csv(summary_path)
+        match = summary[summary["run"] == run_dir.name]
+        if len(match) == 1:
+            row = match.iloc[0]
+            return {
+                "step_mode": str(row["step_mode"]),
+                "train_epochs": int(row["epochs"]),
+                "learning_rate": float(row["learning_rate"]),
+                "train_center_weight": float(row["train_center_weight"]),
+            }
+    return {}
+
+
+def _run_configuration(run_dir: Path, run_name: str, grid_root: Path) -> dict[str, object]:
     """Read exact training settings, with a run-name fallback for old runs."""
     summary_path = run_dir / "ckpts" / "summary.json"
     if summary_path.is_file():
@@ -57,6 +74,10 @@ def _run_configuration(run_dir: Path, run_name: str) -> dict[str, object]:
                 "train_center_weight": float(config["center_weight"]),
             }
 
+    summary_config = _summary_configuration(run_dir, grid_root)
+    if summary_config:
+        return summary_config
+
     match = RUN_PATTERN.fullmatch(Path(run_name).name)
     if not match:
         raise ValueError(
@@ -64,7 +85,7 @@ def _run_configuration(run_dir: Path, run_name: str) -> dict[str, object]:
             f"run name, got {run_name!r}"
         )
     center_tag = match.group("center").replace("p", ".").replace("m", "-")
-    lr_match = re.search(r"(?:^|/)(?:full|mini)_lr_([^/]+)", run_name)
+    lr_match = re.search(r"(?:^|/)mini_lr_([^/]+)", run_name)
     learning_rate = float("nan")
     if lr_match:
         learning_rate = float(lr_match.group(1).replace("p", "."))
@@ -109,18 +130,19 @@ def _find_runs(grid_label: str, grid_root: Path, unit: str) -> tuple[list[dict],
         if not similarity_path.is_file():
             raise FileNotFoundError(f"missing representation similarity CSV: {similarity_path}")
         run_name = str(run_dir.relative_to(grid_root))
-        configuration = _run_configuration(run_dir, run_name)
+        configuration = _run_configuration(run_dir, run_name, grid_root)
         losses = pd.read_csv(loss_path)
         similarities = pd.read_csv(similarity_path)
-        retrained_reference = {
-            f"retrained_{assignment}_{loss_name}": _one_value(
+        reference_losses = {
+            f"{model}_{assignment}_{loss_name}": _one_value(
                 losses,
                 assignment=assignment,
-                model="retrained",
+                model=model,
                 comparison=None,
                 column=loss_name,
                 unit=unit,
             )
+            for model in ("baseline", "retrained")
             for assignment in ("forget", "retain")
             for loss_name in ("task", *COMPONENTS)
         }
@@ -168,19 +190,10 @@ def _find_runs(grid_label: str, grid_root: Path, unit: str) -> tuple[list[dict],
         history.insert(0, "grid", grid_label)
         for column, value in reversed(tuple(configuration.items())):
             history.insert(2, column, value)
-        for column, value in reversed(tuple(retrained_reference.items())):
+        for column, value in reversed(tuple(reference_losses.items())):
             history.insert(2, column, value)
         histories.append(history)
     return rows, histories
-
-
-def _configuration_label(row: pd.Series) -> str:
-    lr = row["learning_rate"]
-    lr_text = "unknown" if pd.isna(lr) else f"{float(lr):g}"
-    return (
-        f"{row['step_mode']} | lr={lr_text} | e={int(row['train_epochs'])} "
-        f"| center={float(row['train_center_weight']):g}"
-    )
 
 
 def _plot_paired_metric(
@@ -198,46 +211,18 @@ def _plot_paired_metric(
     axis.grid(axis="y", alpha=0.25)
 
 
-def _plot_full_mini_metrics(frame: pd.DataFrame, path_prefix: Path, *, mode: str, title: str) -> None:
+def _plot_center_metrics(frame: pd.DataFrame, path_prefix: Path, title: str) -> None:
+    """Plot a fixed-LR/fixed-epoch center-loss ablation."""
     import matplotlib
 
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
-    frame = frame[frame["step_mode"] == mode]
-    epochs = sorted(frame["train_epochs"].unique())
-    for metric, metric_title in METRICS:
-        figure, axes = plt.subplots(1, len(epochs), figsize=(5.5 * len(epochs), 4.5))
-        if len(epochs) == 1:
-            axes = [axes]
-        for axis, epoch in zip(axes, epochs):
-            panel = frame[frame["train_epochs"] == epoch]
-            configurations = panel.drop_duplicates("run").sort_values("train_center_weight")
-            run_order = configurations["run"].tolist()
-            labels = [f"center={value:g}" for value in configurations["train_center_weight"]]
-            _plot_paired_metric(axis, panel, metric=metric, labels=labels, run_order=run_order)
-            axis.set_title(f"epoch={epoch}: {metric_title}")
-            axis.set_ylabel(metric_title)
-            if epoch == epochs[-1]:
-                axis.legend()
-        figure.suptitle(title, y=1.02)
-        figure.tight_layout()
-        figure.savefig(path_prefix.with_name(f"{path_prefix.name}_{metric}.png"), dpi=180)
-        plt.close(figure)
-
-
-def _plot_small_lr_metrics(frame: pd.DataFrame, path_prefix: Path, title: str) -> None:
-    """Compare LR/epoch choices within one small-LR mode/center group."""
-    import matplotlib
-
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
-
-    configurations = frame.drop_duplicates("run").sort_values(["learning_rate", "train_epochs"])
+    configurations = frame.drop_duplicates("run").sort_values("train_center_weight")
     run_order = configurations["run"].tolist()
-    labels = [f"lr={lr:g}\ne={epoch}" for lr, epoch in zip(configurations["learning_rate"], configurations["train_epochs"])]
+    labels = [f"center={weight:g}" for weight in configurations["train_center_weight"]]
     for metric, metric_title in METRICS:
-        figure, axis = plt.subplots(figsize=(max(10, len(run_order) * 1.35), 4.5))
+        figure, axis = plt.subplots(figsize=(max(7, len(run_order) * 1.5), 4.5))
         _plot_paired_metric(axis, frame, metric=metric, labels=labels, run_order=run_order)
         axis.set_title(metric_title)
         axis.legend()
@@ -263,6 +248,14 @@ def _plot_loss_components(history: pd.DataFrame, path: Path, title: str) -> None
             axes[1].plot(curve["epoch"], curve[f"forget_{component}"], label=component, color=color)
     reference = history.iloc[0]
     axes[0].axhline(
+        reference["baseline_forget_task"], color="tab:blue", linestyle=":",
+        label="baseline forget (final)",
+    )
+    axes[0].axhline(
+        reference["baseline_retain_task"], color="tab:orange", linestyle=":",
+        label="baseline retain (final)",
+    )
+    axes[0].axhline(
         reference["retrained_forget_task"], color="tab:blue", linestyle="--",
         label="retrained forget (final)",
     )
@@ -271,6 +264,10 @@ def _plot_loss_components(history: pd.DataFrame, path: Path, title: str) -> None
         label="retrained retain (final)",
     )
     for component, color in zip(COMPONENTS, ("tab:blue", "tab:orange", "tab:green", "tab:red")):
+        axes[1].axhline(
+            reference[f"baseline_forget_{component}"], color=color, linestyle=":",
+            label=f"baseline {component} (final)",
+        )
         axes[1].axhline(
             reference[f"retrained_forget_{component}"], color=color, linestyle="--",
             label=f"retrained {component} (final)",
@@ -284,22 +281,6 @@ def _plot_loss_components(history: pd.DataFrame, path: Path, title: str) -> None
     figure.tight_layout()
     figure.savefig(path, dpi=180)
     plt.close(figure)
-
-
-def _metric_group_columns(grid_label: str) -> list[str]:
-    """Keep only directly comparable configurations in one metrics panel."""
-    if "full_mini" in grid_label:
-        # Exactly two bars: full versus mini under an identical epoch/center setting.
-        return ["train_epochs", "train_center_weight"]
-    if "small_lr" in grid_label:
-        # Compare LR/epoch choices within one update mode and center-loss condition.
-        return ["step_mode", "train_center_weight"]
-    return ["step_mode", "learning_rate", "train_center_weight"]
-
-
-def _group_title(grid: str, columns: list[str], values: tuple[object, ...]) -> str:
-    settings = ", ".join(f"{column}={value:g}" if isinstance(value, float) else f"{column}={value}" for column, value in zip(columns, values))
-    return f"{grid}: {settings}"
 
 
 def main(args: argparse.Namespace) -> None:
@@ -317,44 +298,25 @@ def main(args: argparse.Namespace) -> None:
     metrics = pd.DataFrame(metric_rows).sort_values(["grid", "run", "assignment"])
     metrics.to_csv(output_dir / "unlearned_vs_retrained_metrics.csv", index=False)
     for grid_label, frame in metrics.groupby("grid", sort=True):
-        if "full_mini" in grid_label:
-            for mode in ("full", "mini"):
-                _plot_full_mini_metrics(
-                    frame,
-                    output_dir / f"metrics_{_safe_name(grid_label)}_{mode}",
-                    mode=mode,
-                    title=f"{grid_label}: {mode}",
-                )
-        else:
-            group_columns = _metric_group_columns(grid_label)
-            for values, group in frame.groupby(group_columns, sort=True, dropna=False):
-                if not isinstance(values, tuple):
-                    values = (values,)
-                tag = "_".join(f"{column}_{value:g}" if isinstance(value, float) else f"{column}_{value}" for column, value in zip(group_columns, values))
-                _plot_small_lr_metrics(
-                    group,
-                    output_dir / f"metrics_{_safe_name(grid_label)}_{_safe_name(tag)}",
-                    title=_group_title(grid_label, group_columns, values),
-                )
+        _plot_center_metrics(
+            frame,
+            output_dir / f"metrics_{_safe_name(grid_label)}",
+            grid_label,
+        )
 
     if histories:
         all_history = pd.concat(histories, ignore_index=True)
         all_history.to_csv(output_dir / "all_history.csv", index=False)
         for grid_label, frame in all_history.groupby("grid", sort=True):
             history_columns = ["step_mode", "learning_rate", "train_center_weight"]
-            # Each requested epoch is a separate deterministic run.  Retain only the
-            # longest run for a configuration, rather than drawing the same prefix
-            # three or four times on top of itself.
-            longest_epochs = frame.groupby(history_columns, dropna=False)["train_epochs"].transform("max")
-            longest = frame[frame["train_epochs"] == longest_epochs]
-            for values, group in longest.groupby(history_columns, sort=True, dropna=False):
+            for values, group in frame.groupby(history_columns, sort=True, dropna=False):
                 if not isinstance(values, tuple):
                     values = (values,)
                 tag = "_".join(f"{column}_{value:g}" if isinstance(value, float) else f"{column}_{value}" for column, value in zip(history_columns, values))
                 _plot_loss_components(
                     group,
                     output_dir / f"loss_components_{_safe_name(grid_label)}_{_safe_name(tag)}.png",
-                    _group_title(grid_label, history_columns, values),
+                    f"{grid_label}: {tag}",
                 )
     else:
         print("[warning] no history.csv files were found; no loss-component plots were written")

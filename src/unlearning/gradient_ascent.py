@@ -237,12 +237,8 @@ def unlearn(args: argparse.Namespace) -> None:
         **{f"retain_{key}": value for key, value in baseline_retain.items()},
     }]
     print(f"[data] forget={len(forget_indices)} retain={len(retain_indices)} micro_batch={args.batch_size}")
-    steps_per_epoch = 1 if args.step_mode == "full" else len(forget_loader)
-    effective_batch = (
-        len(forget_indices)
-        if args.step_mode == "full"
-        else min(args.batch_size, len(forget_indices))
-    )
+    steps_per_epoch = len(forget_loader)
+    effective_batch = min(args.batch_size, len(forget_indices))
     print(
         f"[batch] mode={args.step_mode} optimizer_steps_per_epoch={steps_per_epoch} "
         f"effective_batch<={effective_batch}"
@@ -275,11 +271,8 @@ def unlearn(args: argparse.Namespace) -> None:
         source_ae.decoder.eval()
         center.eval()
         step_norms = []
-        if args.step_mode == "full":
-            optimizer.zero_grad(set_to_none=True)
         for target_gex, _, labels in forget_loader:
-            if args.step_mode == "mini":
-                optimizer.zero_grad(set_to_none=True)
+            optimizer.zero_grad(set_to_none=True)
             target_gex, labels = target_gex.to(device), labels.to(device)
             output = forward_aligner(models, target_gex, source_gex)
             losses = alignment_losses(
@@ -291,14 +284,10 @@ def unlearn(args: argparse.Namespace) -> None:
                 args.class_weight,
                 args.center_weight,
             )
-            batch_weight = len(target_gex) / len(forget_indices) if args.step_mode == "full" else 1.0
-            objective = -args.forget_weight * losses["task"] * batch_weight
+            objective = -args.forget_weight * losses["task"]
             if not torch.isfinite(objective):
                 raise RuntimeError(f"non-finite ascent objective at epoch {epoch}")
             objective.backward()
-            if args.step_mode == "mini":
-                step_norms.append(optimizer_update())
-        if args.step_mode == "full":
             step_norms.append(optimizer_update())
 
         optimizer_steps = len(step_norms)
@@ -439,7 +428,7 @@ if __name__ == "__main__":
     parser.add_argument("--plateau-range-rtol", type=float, default=5e-3)
     parser.add_argument("--plateau-window", type=int, default=5)
     parser.add_argument("--min-forget-rise-rtol", type=float, default=1e-2)
-    parser.add_argument("--step-mode", choices=("full", "mini"), default="full")
+    parser.add_argument("--step-mode", choices=("mini",), default="mini")
     parser.add_argument("--batch-size", type=int, default=64)
     parser.add_argument("--eval-batch-size", type=int, default=256)
     parser.add_argument("--lr", type=float, default=1e-5)

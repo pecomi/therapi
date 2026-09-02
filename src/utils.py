@@ -5,6 +5,8 @@ import torch
 from datetime import datetime
 
 def set_seed(seed=42,logger=print):
+    # Must be set before the first CUDA operation for deterministic cuBLAS GEMM.
+    os.environ['CUBLAS_WORKSPACE_CONFIG'] = ':4096:8'
     os.environ['PYTHONHASHSEED'] = str(seed)
     random.seed(seed)
     np.random.seed(seed)
@@ -13,6 +15,7 @@ def set_seed(seed=42,logger=print):
     torch.cuda.manual_seed_all(seed)
     torch.backends.cudnn.deterministic = True
     torch.backends.cudnn.benchmark = False
+    torch.use_deterministic_algorithms(True)
     logger(f'random seed with {seed}')
 
 class Logger:
