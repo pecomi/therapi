@@ -357,7 +357,7 @@ def unlearn(args: argparse.Namespace) -> None:
         selected_epoch = args.epochs
 
     final_forget, final_retain = evaluate(forget_eval_loader), evaluate(retain_eval_loader)
-    checkpoint_path = output_dir / "THERAPI_aligner_unlearned.pt"
+    checkpoint_path = output_dir / f"THERAPI_aligner_{args.source}_{args.target}.pt"
     torch.save(
         {
             "epoch": checkpoint.get("epoch"),

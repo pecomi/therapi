@@ -146,7 +146,7 @@ def retrain(args: argparse.Namespace) -> None:
             f"source={row['source']:.6f} target_retain={row['target']:.6f}"
         )
 
-    checkpoint_path = output_dir / "THERAPI_aligner_retrained_retain_only.pt"
+    checkpoint_path = output_dir / f"THERAPI_aligner_{args.source}_{args.target}.pt"
     torch.save(
         {
             "epoch": args.epochs - 1,

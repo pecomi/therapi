@@ -131,7 +131,7 @@ python src/unlearning/gradient_ascent.py \
 출력:
 
 ```text
-run/unlearn_5pct_seed0/ckpts/THERAPI_aligner_unlearned.pt
+run/unlearn_5pct_seed0/ckpts/THERAPI_aligner_GDSC_TCGA.pt
 run/unlearn_5pct_seed0/ckpts/history.csv
 run/unlearn_5pct_seed0/ckpts/summary.json
 run/unlearn_5pct_seed0/ckpts/loss_curve.png
@@ -234,7 +234,7 @@ python src/unlearning/retrain.py \
 출력:
 
 ```text
-run/retrain_retain_5pct_seed0/ckpts/THERAPI_aligner_retrained_retain_only.pt
+run/retrain_retain_5pct_seed0/ckpts/THERAPI_aligner_GDSC_TCGA.pt
 run/retrain_retain_5pct_seed0/ckpts/history.csv
 ```
 
@@ -244,24 +244,18 @@ run/retrain_retain_5pct_seed0/ckpts/history.csv
 디렉터리를 줄 수 있다. `run/<RUN_NAME>`을 주면 스크립트가 `ckpts`를 자동으로
 추가하며, `run/<RUN_NAME>/ckpts`를 직접 주어도 중복으로 추가하지 않는다.
 
-## 5. Pipeline이 찾는 aligner 이름 연결
+## 5. Pipeline checkpoint 이름
 
-`pipline.sh`는 각 run에서 아래 고정 이름을 찾는다.
+`gradient_ascent.py`와 `retrain.py`는 `pipline.sh`가 각 run에서 찾는 아래 이름으로
+checkpoint를 직접 저장한다.
 
 ```text
 run/<RUN_NAME>/ckpts/THERAPI_aligner_GDSC_TCGA.pt
 ```
 
-따라서 unlearned와 retrained checkpoint를 각각 이 이름으로 복사한다. 원본
-파일은 보존된다.
-
-```bash
-cp "run/$UNLEARN_RUN/ckpts/THERAPI_aligner_unlearned.pt" \
-   "run/$UNLEARN_RUN/ckpts/THERAPI_aligner_GDSC_TCGA.pt"
-
-cp "run/$RETRAIN_RUN/ckpts/THERAPI_aligner_retrained_retain_only.pt" \
-   "run/$RETRAIN_RUN/ckpts/THERAPI_aligner_GDSC_TCGA.pt"
-```
+별도 복사나 이름 변경 없이 해당 run에서 바로 `STAGES="embed test"`를 실행할 수
+있다. Baseline, unlearned, retrained는 run 디렉터리가 다르므로 동일한 파일명을
+사용해도 서로 덮어쓰지 않는다.
 
 ## 6. Predictor를 동일하게 유지
 
@@ -378,19 +372,18 @@ python -c 'import torch, pandas, rdkit, sklearn; print(torch.cuda.is_available()
 각 pipeline 로그의 `[align]` 줄에서 실제로 사용된 checkpoint가 해당 run의
 `THERAPI_aligner_GDSC_TCGA.pt`인지 반드시 확인한다.
 
-## 10. Forget/retain representation 변화 평가
+## 10. Forget/retain aligner 평가
 
 같은 `TCGA_unlabeled`의 forget/retain 환자를 baseline, unlearned,
-retain-only retrained aligner 세 개에 모두 통과시킨다. 환자별 latent,
-attention, reconstruction, center distance를 비교하고 unlearning이 deletion
-retraining에 가까워졌는지 계산한다.
+retain-only retrained aligner 세 개에 모두 통과시킨다. 출력 지표는 연구 질문에
+직접 필요한 aligner loss와 latent geometry 비교만 사용한다.
 
 ```bash
 python src/unlearning/evaluate_representations.py \
   --data_dir data \
   --baseline-checkpoint "run/$BASELINE_RUN/ckpts/THERAPI_aligner_GDSC_TCGA.pt" \
-  --unlearned-checkpoint "run/$UNLEARN_RUN/ckpts/THERAPI_aligner_unlearned.pt" \
-  --retrained-checkpoint "run/$RETRAIN_RUN/ckpts/THERAPI_aligner_retrained_retain_only.pt" \
+  --unlearned-checkpoint "run/$UNLEARN_RUN/ckpts/THERAPI_aligner_GDSC_TCGA.pt" \
+  --retrained-checkpoint "run/$RETRAIN_RUN/ckpts/THERAPI_aligner_GDSC_TCGA.pt" \
   --split-dir "splits/$SPLIT_NAME" \
   --output-dir "run/$UNLEARN_RUN/evaluation/representations" \
   --device "$DEVICE" \
@@ -400,12 +393,9 @@ python src/unlearning/evaluate_representations.py \
 출력 파일:
 
 ```text
-representation_change_per_sample.csv
-representation_change_per_patient.csv
-representation_change_group_summary.csv
-representation_change_summary.json
 loss_metrics.csv
 representation_similarity.csv
+evaluation_summary.json
 ```
 
 `loss_metrics.csv`는 baseline/unlearned/retrained 각각에 대해 forget/retain의
@@ -413,7 +403,7 @@ representation_similarity.csv
 `unit=sample`은 모든 sample에 같은 가중치를 주고, `unit=patient`는 환자 내
 sample을 먼저 평균내어 sample 수가 많은 환자의 영향이 커지지 않게 한다.
 
-`representation_similarity.csv`에는 latent에 대한 다음 두 지표가 sample과
+`representation_similarity.csv`에는 세 모델 쌍에 대한 latent 비교만 sample과
 patient 수준으로 기록된다.
 
 - **Linear CKA**: 동일 sample의 representation geometry 유사도다. 1에
@@ -428,49 +418,20 @@ patient 수준으로 기록된다.
   그대로 적용하는 것은 부적절하다. Gaussian 가정과 표본 수에 민감하므로 CKA
   및 task loss와 함께 해석한다.
 
-핵심 비교는 forget에서 `unlearned_vs_retrained`의 CKA가 커지고 Fréchet
-distance가 작아지는지, retain에서 `baseline_vs_unlearned`가 잘 보존되는지다.
-
-터미널에는 forget/retain의 환자 단위 평균과 다음 선택성 비율이 출력된다.
-
-```text
-forget 환자 평균 latent RMSE / retain 환자 평균 latent RMSE
-```
-
-이 비율이 1보다 클수록 forget 환자 representation이 상대적으로 더 많이
-변했다. 단, 비율만 보지 말고 retain의 절대 변화량과 center distance,
-attention, reconstruction 변화도 함께 확인한다.
-
-세 모델 비교에서 핵심 열은 다음과 같다.
-
-```text
-*_baseline_unlearned
-  원본과 unlearned 사이 거리
-
-*_baseline_retrained
-  원본과 삭제 후 재학습 모델 사이 거리
-
-*_unlearned_retrained
-  unlearned와 삭제 후 재학습 모델 사이 거리
-
-*_improvement_to_retrained
-  baseline-retrained 거리 - unlearned-retrained 거리
-```
-
-`*_improvement_to_retrained`이 양수이면 unlearning이 해당 지표에서 원본보다
-retain-only retrained 모델에 가까워졌다는 뜻이다. 이 값을 forget과 retain에서
-각각 확인한다.
+비교 쌍은 `baseline_vs_unlearned`, `baseline_vs_retrained`,
+`unlearned_vs_retrained` 세 가지다. 핵심 해석은 다음과 같다.
 
 ```text
 forget:
-  improvement_to_retrained > 0 이 주요 목표
+  unlearned_vs_retrained CKA가 높고 Frechet distance가 낮아야 함
 
 retain:
-  baseline_unlearned 거리가 작아야 함
-  retain utility가 유지되는지도 함께 확인
+  baseline_vs_unlearned CKA가 높고 Frechet distance가 낮아야 함
+  unlearned loss가 baseline loss와 비슷해야 함
 ```
 
-Raw latent는 retraining 과정에서 좌표계가 달라질 수 있으므로 참고 지표로
-사용한다. center distance, tissue 정답 확률, attention 분포,
-reconstruction output처럼 기능적 출력의 `improvement_to_retrained`을 더
-중요하게 해석한다.
+`evaluation_summary.json`에는 사용한 checkpoint, split, sample/patient 수, loss
+가중치와 실제 보고 지표 목록만 기록된다. Attention JS, latent RMSE, true-class
+probability 같은 부가 지표는 더 이상 계산하거나 출력하지 않는다. 같은 출력
+디렉터리를 재사용해도 이전 evaluator가 만든 `representation_change_*` 파일은
+평가 성공 후 제거하므로 구버전 지표와 섞이지 않는다.
