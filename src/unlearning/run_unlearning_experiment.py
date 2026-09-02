@@ -12,7 +12,7 @@ import pandas as pd
 
 
 SCRIPT_DIR = Path(__file__).resolve().parent
-FIXED_BATCH_SIZE, FIXED_LR, FIXED_EPOCHS = 128, 1e-4, 30
+DEFAULT_BATCH_SIZE, DEFAULT_LR, DEFAULT_EPOCHS = 128, 1e-4, 30
 
 
 def _tag(value: float) -> str:
@@ -65,6 +65,10 @@ def _aggregate(experiments: list[dict], output_root: Path) -> None:
 
 
 def main(args: argparse.Namespace) -> None:
+    positive = {"batch_size": args.batch_size, "lr": args.lr, "epochs": args.epochs}
+    invalid = {name: value for name, value in positive.items() if value <= 0}
+    if invalid:
+        raise ValueError(f"arguments must be positive: {invalid}")
     baseline, retrained, split_dir = Path(args.baseline_checkpoint), Path(args.retrained_checkpoint), Path(args.split_dir)
     for label, path in (("baseline checkpoint", baseline), ("retrained checkpoint", retrained), ("split manifest", split_dir / "samples.csv")):
         if not path.is_file():
@@ -73,27 +77,27 @@ def main(args: argparse.Namespace) -> None:
     output_root.mkdir(parents=True, exist_ok=True)
     checkpoint_name = f"THERAPI_aligner_{args.source}_{args.target}.pt"
     experiments = []
-    center_weight = args.center_weight
-    if center_weight < 0:
-        raise ValueError("center weight must be non-negative")
+    loss_weights = (args.recon_weight, args.class_weight, args.center_weight)
+    if any(weight < 0 for weight in loss_weights) or not any(loss_weights):
+        raise ValueError("loss weights must be non-negative and at least one must be positive")
     for unlearn_seed in args.unlearn_seeds:
         run_name = (
-            f"mini_epoch_{FIXED_EPOCHS:03d}_lr_{_tag(FIXED_LR)}"
-            f"_center_{_tag(center_weight)}_unlearn_seed_{unlearn_seed}"
+            f"mini_epoch_{args.epochs:03d}_lr_{_tag(args.lr)}"
+            f"_center_{_tag(args.center_weight)}_unlearn_seed_{unlearn_seed}"
         )
         run_dir = output_root / run_name
         checkpoint = run_dir / "ckpts" / checkpoint_name
         evaluation_dir = run_dir / "evaluation" / "representations"
-        experiments.append({"run": run_name, "center_weight": center_weight, "unlearn_seed": unlearn_seed, "history_path": run_dir / "ckpts" / "history.csv", "evaluation_dir": evaluation_dir})
+        experiments.append({"run": run_name, "center_weight": args.center_weight, "unlearn_seed": unlearn_seed, "history_path": run_dir / "ckpts" / "history.csv", "evaluation_dir": evaluation_dir})
         if not args.skip_training:
             _run([
                 sys.executable, str(SCRIPT_DIR / "gradient_ascent.py"), "--data_dir", args.data_dir,
                 "--source", args.source, "--target", args.target, "--checkpoint", str(baseline),
                 "--split-dir", str(split_dir), "--output-dir", str(run_dir), "--device", args.device,
                 "--original-train-seed", str(args.original_train_seed), "--unlearn-seed", str(unlearn_seed),
-                "--step-mode", "mini", "--batch-size", str(FIXED_BATCH_SIZE), "--lr", str(FIXED_LR),
-                "--epochs", str(FIXED_EPOCHS), "--recon-weight", "0.2",
-                "--class-weight", "0.4", "--center-weight", str(center_weight),
+                "--step-mode", "mini", "--batch-size", str(args.batch_size), "--lr", str(args.lr),
+                "--epochs", str(args.epochs), "--recon-weight", str(args.recon_weight),
+                "--class-weight", str(args.class_weight), "--center-weight", str(args.center_weight),
             ], args.dry_run)
         if not args.skip_evaluation:
             _run([
@@ -101,10 +105,10 @@ def main(args: argparse.Namespace) -> None:
                 "--source", args.source, "--target", args.target, "--baseline-checkpoint", str(baseline),
                 "--unlearned-checkpoint", str(checkpoint), "--retrained-checkpoint", str(retrained),
                 "--split-dir", str(split_dir), "--output-dir", str(evaluation_dir), "--device", args.device,
-                "--original-train-seed", str(args.original_train_seed), "--recon-weight", "0.2",
+                "--original-train-seed", str(args.original_train_seed), "--recon-weight", str(args.recon_weight),
                 # Evaluation must use the exact objective used for this run.
                 # Otherwise the epoch-0 history loss cannot equal baseline loss.
-                "--class-weight", "0.4", "--center-weight", str(center_weight),
+                "--class-weight", str(args.class_weight), "--center-weight", str(args.center_weight),
             ], args.dry_run)
     if not args.dry_run:
         _aggregate(experiments, output_root)
@@ -123,6 +127,11 @@ if __name__ == "__main__":
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--original-train-seed", type=int, default=0)
     parser.add_argument("--unlearn-seeds", type=int, nargs="+", default=[0, 1, 2, 3, 4])
+    parser.add_argument("--batch-size", type=int, default=DEFAULT_BATCH_SIZE)
+    parser.add_argument("--lr", type=float, default=DEFAULT_LR)
+    parser.add_argument("--epochs", type=int, default=DEFAULT_EPOCHS)
+    parser.add_argument("--recon-weight", type=float, default=0.2)
+    parser.add_argument("--class-weight", type=float, default=0.4)
     parser.add_argument("--center-weight", type=float, default=0.8)
     parser.add_argument("--skip-training", action="store_true")
     parser.add_argument("--skip-evaluation", action="store_true")
