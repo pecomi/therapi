@@ -179,11 +179,11 @@ def unlearn(args: argparse.Namespace) -> None:
     # gradient; center anchors remain fixed, matching the original optimizer.
     _freeze(source_ae.decoder)
     _freeze(center)
+    _freeze(target_encoder.decoder)
     groups = [
         ("source_encoder", source_ae.encoder.parameters()),
         ("target_Q", target_encoder.Q.parameters()),
         ("target_K", target_encoder.K.parameters()),
-        ("target_decoder", target_encoder.decoder.parameters()),
         ("latent_classifier", emb_classifier.parameters()),
         ("expression_classifier", exp_classifier.parameters()),
     ]

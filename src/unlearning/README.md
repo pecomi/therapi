@@ -113,7 +113,7 @@ python src/unlearning/gradient_ascent.py \
   --output-dir "run/$UNLEARN_RUN" \
   --device "$DEVICE" \
   --original-train-seed 0 \
-  --unlearn-seed 0 \
+  --unlearn-seeds 0 1 2 3 4 \
   --step-mode mini \
   --batch-size 128 \
   --lr 1e-4 \
@@ -419,7 +419,7 @@ rate는 `1e-4`, ascent epoch은 30으로 고정하며, training center-loss weig
 ablation한다. CSG2A, predictor, downstream test는 실행하지 않는다.
 
 ```bash
-python src/unlearning/run_experiment_grid.py \
+python src/unlearning/run_unlearning_experiment.py \
   --data-dir data \
   --baseline-checkpoint "run/baseline_seed0_3/ckpts/THERAPI_aligner_GDSC_TCGA.pt" \
   --retrained-checkpoint "run/retrain_5pct_seed0/ckpts/THERAPI_aligner_GDSC_TCGA.pt" \
@@ -428,7 +428,7 @@ python src/unlearning/run_experiment_grid.py \
   --device cuda:0 \
   --original-train-seed 0 \
   --unlearn-seed 0 \
-  --center-weights 0 0.8
+  --center-weight 0.8
 ```
 
 평가는 patient 단위의 signed task-loss difference

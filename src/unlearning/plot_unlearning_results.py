@@ -22,11 +22,11 @@ RUN_PATTERN = re.compile(
 )
 
 
-def _parse_grid(value: str) -> tuple[str, Path]:
+def _parse_experiment(value: str) -> tuple[str, Path]:
     label, separator, path = value.partition("=")
     if not separator or not label or not path:
         raise argparse.ArgumentTypeError(
-            "--grid must use LABEL=PATH, for example mini_center=run/ga_mini_center_lr1e4_epoch30_seed0"
+            "--experiment must use LABEL=PATH, for example mini_center=run/unlearn_mini_lr1e4_epoch30_center0p8_seed0"
         )
     return label, Path(path)
 
@@ -35,11 +35,11 @@ def _safe_name(value: str) -> str:
     return re.sub(r"[^A-Za-z0-9_.-]+", "_", value).strip("_")
 
 
-def _summary_configuration(run_dir: Path, grid_root: Path) -> dict[str, object]:
-    """Find the nearest grid summary and recover a row for ``run_dir``."""
+def _summary_configuration(run_dir: Path, experiment_root: Path) -> dict[str, object]:
+    """Find the nearest experiment summary and recover a row for ``run_dir``."""
     for directory in (run_dir, *run_dir.parents):
         try:
-            directory.relative_to(grid_root)
+            directory.relative_to(experiment_root)
         except ValueError:
             break
         summary_path = directory / "comparison_summary.csv"
@@ -54,27 +54,29 @@ def _summary_configuration(run_dir: Path, grid_root: Path) -> dict[str, object]:
                 "train_epochs": int(row["epochs"]),
                 "learning_rate": float(row["learning_rate"]),
                 "train_center_weight": float(row["train_center_weight"]),
+                "unlearn_seed": int(row.get("unlearn_seed", 0)),
             }
     return {}
 
 
-def _run_configuration(run_dir: Path, run_name: str, grid_root: Path) -> dict[str, object]:
+def _run_configuration(run_dir: Path, run_name: str, experiment_root: Path) -> dict[str, object]:
     """Read exact training settings, with a run-name fallback for old runs."""
     summary_path = run_dir / "ckpts" / "summary.json"
     if summary_path.is_file():
         with summary_path.open(encoding="utf-8") as handle:
             summary = json.load(handle)
         config = summary.get("unlearning_config", {})
-        required = {"step_mode", "epochs", "lr", "center_weight"}
+        required = {"step_mode", "epochs", "lr", "center_weight", "unlearn_seed"}
         if required <= set(config):
             return {
                 "step_mode": str(config["step_mode"]),
                 "train_epochs": int(config["epochs"]),
                 "learning_rate": float(config["lr"]),
                 "train_center_weight": float(config["center_weight"]),
+                "unlearn_seed": int(config["unlearn_seed"]),
             }
 
-    summary_config = _summary_configuration(run_dir, grid_root)
+    summary_config = _summary_configuration(run_dir, experiment_root)
     if summary_config:
         return summary_config
 
@@ -94,6 +96,7 @@ def _run_configuration(run_dir: Path, run_name: str, grid_root: Path) -> dict[st
         "train_epochs": int(match.group("epochs")),
         "learning_rate": learning_rate,
         "train_center_weight": float(center_tag),
+        "unlearn_seed": 0,
     }
 
 
@@ -115,12 +118,12 @@ def _one_value(
     return float(values.iloc[0])
 
 
-def _find_runs(grid_label: str, grid_root: Path, unit: str) -> tuple[list[dict], list[pd.DataFrame]]:
+def _find_runs(experiment_label: str, experiment_root: Path, unit: str) -> tuple[list[dict], list[pd.DataFrame]]:
     rows: list[dict] = []
     histories: list[pd.DataFrame] = []
-    evaluation_files = sorted(grid_root.rglob("evaluation/representations/loss_metrics.csv"))
+    evaluation_files = sorted(experiment_root.rglob("evaluation/representations/loss_metrics.csv"))
     if not evaluation_files:
-        raise FileNotFoundError(f"no evaluation/representations/loss_metrics.csv below {grid_root}")
+        raise FileNotFoundError(f"no evaluation/representations/loss_metrics.csv below {experiment_root}")
 
     for loss_path in evaluation_files:
         representation_dir = loss_path.parent
@@ -129,8 +132,8 @@ def _find_runs(grid_label: str, grid_root: Path, unit: str) -> tuple[list[dict],
         history_path = run_dir / "ckpts" / "history.csv"
         if not similarity_path.is_file():
             raise FileNotFoundError(f"missing representation similarity CSV: {similarity_path}")
-        run_name = str(run_dir.relative_to(grid_root))
-        configuration = _run_configuration(run_dir, run_name, grid_root)
+        run_name = str(run_dir.relative_to(experiment_root))
+        configuration = _run_configuration(run_dir, run_name, experiment_root)
         losses = pd.read_csv(loss_path)
         similarities = pd.read_csv(similarity_path)
         reference_losses = {
@@ -158,7 +161,7 @@ def _find_runs(grid_label: str, grid_root: Path, unit: str) -> tuple[list[dict],
             )
             rows.append(
                 {
-                    "grid": grid_label,
+                    "experiment": experiment_label,
                     "run": run_name,
                     **configuration,
                     "assignment": assignment,
@@ -187,7 +190,7 @@ def _find_runs(grid_label: str, grid_root: Path, unit: str) -> tuple[list[dict],
         if missing:
             raise ValueError(f"history log missing {sorted(missing)}: {history_path}")
         history.insert(0, "run", run_name)
-        history.insert(0, "grid", grid_label)
+        history.insert(0, "experiment", experiment_label)
         for column, value in reversed(tuple(configuration.items())):
             history.insert(2, column, value)
         for column, value in reversed(tuple(reference_losses.items())):
@@ -218,9 +221,9 @@ def _plot_center_metrics(frame: pd.DataFrame, path_prefix: Path, title: str) -> 
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
-    configurations = frame.drop_duplicates("run").sort_values("train_center_weight")
+    configurations = frame.drop_duplicates("run").sort_values("unlearn_seed")
     run_order = configurations["run"].tolist()
-    labels = [f"center={weight:g}" for weight in configurations["train_center_weight"]]
+    labels = [f"seed={seed}" for seed in configurations["unlearn_seed"]]
     for metric, metric_title in METRICS:
         figure, axis = plt.subplots(figsize=(max(7, len(run_order) * 1.5), 4.5))
         _plot_paired_metric(axis, frame, metric=metric, labels=labels, run_order=run_order)
@@ -288,35 +291,35 @@ def main(args: argparse.Namespace) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     metric_rows: list[dict] = []
     histories: list[pd.DataFrame] = []
-    for grid_label, grid_root in args.grid:
-        if not grid_root.is_dir():
-            raise FileNotFoundError(f"grid directory does not exist: {grid_root}")
-        rows, grid_histories = _find_runs(grid_label, grid_root, args.unit)
+    for experiment_label, experiment_root in args.experiment:
+        if not experiment_root.is_dir():
+            raise FileNotFoundError(f"experiment directory does not exist: {experiment_root}")
+        rows, experiment_histories = _find_runs(experiment_label, experiment_root, args.unit)
         metric_rows.extend(rows)
-        histories.extend(grid_histories)
+        histories.extend(experiment_histories)
 
-    metrics = pd.DataFrame(metric_rows).sort_values(["grid", "run", "assignment"])
+    metrics = pd.DataFrame(metric_rows).sort_values(["experiment", "run", "assignment"])
     metrics.to_csv(output_dir / "unlearned_vs_retrained_metrics.csv", index=False)
-    for grid_label, frame in metrics.groupby("grid", sort=True):
+    for experiment_label, frame in metrics.groupby("experiment", sort=True):
         _plot_center_metrics(
             frame,
-            output_dir / f"metrics_{_safe_name(grid_label)}",
-            grid_label,
+            output_dir / f"metrics_{_safe_name(experiment_label)}",
+            experiment_label,
         )
 
     if histories:
         all_history = pd.concat(histories, ignore_index=True)
         all_history.to_csv(output_dir / "all_history.csv", index=False)
-        for grid_label, frame in all_history.groupby("grid", sort=True):
-            history_columns = ["step_mode", "learning_rate", "train_center_weight"]
+        for experiment_label, frame in all_history.groupby("experiment", sort=True):
+            history_columns = ["step_mode", "learning_rate", "train_center_weight", "unlearn_seed"]
             for values, group in frame.groupby(history_columns, sort=True, dropna=False):
                 if not isinstance(values, tuple):
                     values = (values,)
                 tag = "_".join(f"{column}_{value:g}" if isinstance(value, float) else f"{column}_{value}" for column, value in zip(history_columns, values))
                 _plot_loss_components(
                     group,
-                    output_dir / f"loss_components_{_safe_name(grid_label)}_{_safe_name(tag)}.png",
-                    f"{grid_label}: {tag}",
+                    output_dir / f"loss_components_{_safe_name(experiment_label)}_{_safe_name(tag)}.png",
+                    f"{experiment_label}: {tag}",
                 )
     else:
         print("[warning] no history.csv files were found; no loss-component plots were written")
@@ -326,8 +329,8 @@ def main(args: argparse.Namespace) -> None:
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
-        "--grid", type=_parse_grid, action="append", required=True,
-        help="LABEL=PATH; repeat once per experiment grid",
+        "--experiment", type=_parse_experiment, action="append", required=True,
+        help="LABEL=PATH; repeat once per result directory",
     )
     parser.add_argument("--output-dir", required=True)
     parser.add_argument("--unit", choices=("patient", "sample"), default="patient")
