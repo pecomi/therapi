@@ -132,8 +132,9 @@ def unlearn(args: argparse.Namespace) -> None:
     _freeze(source_ae.decoder)
     _freeze(center)
     _freeze(target_encoder.decoder)
+    _freeze(source_ae.encoder)
     groups = [
-        ("source_encoder", source_ae.encoder.parameters()),
+        # ("source_encoder", source_ae.encoder.parameters()),
         ("target_Q", target_encoder.Q.parameters()),
         ("target_K", target_encoder.K.parameters()),
         ("latent_classifier", emb_classifier.parameters()),
