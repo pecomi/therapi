@@ -168,25 +168,65 @@ def _configuration_label(row: pd.Series) -> str:
     )
 
 
-def _plot_metrics(frame: pd.DataFrame, path: Path, title: str) -> None:
+def _plot_paired_metric(
+    axis, frame: pd.DataFrame, *, metric: str, labels: list[str], run_order: list[str]
+) -> None:
+    values = frame.set_index(["run", "assignment"])[metric]
+    x = np.arange(len(run_order))
+    width = 0.38
+    for offset, assignment, color in ((-width / 2, "forget", "tab:blue"), (width / 2, "retain", "tab:orange")):
+        y = [values.loc[(run, assignment)] for run in run_order]
+        axis.bar(x + offset, y, width=width, label=assignment, color=color)
+    axis.set_xticks(x, labels, rotation=35, ha="right", fontsize=8)
+    axis.grid(axis="y", alpha=0.25)
+
+
+def _plot_full_mini_metrics(frame: pd.DataFrame, path: Path, *, mode: str, title: str) -> None:
     import matplotlib
 
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
-    configurations = frame.drop_duplicates("run").copy()
-    configurations["plot_label"] = configurations.apply(_configuration_label, axis=1)
-    runs = configurations["run"].tolist()
-    labels = configurations["plot_label"].tolist()
-    figure, axes = plt.subplots(2, 3, figsize=(max(18, len(runs) * 1.1), 10))
-    for row_index, assignment in enumerate(("forget", "retain")):
-        values = frame[frame["assignment"] == assignment].set_index("run").loc[runs]
-        for axis, (column, title) in zip(axes[row_index], METRICS):
-            axis.bar(np.arange(len(runs)), values[column].to_numpy())
-            axis.set_title(f"{assignment}: {title}")
-            axis.set_xticks(np.arange(len(runs)), labels, rotation=45, ha="right", fontsize=8)
-            axis.grid(axis="y", alpha=0.25)
+    frame = frame[frame["step_mode"] == mode]
+    epochs = sorted(frame["train_epochs"].unique())
+    figure, axes = plt.subplots(3, len(epochs), figsize=(5.5 * len(epochs), 12))
+    if len(epochs) == 1:
+        axes = axes[:, None]
+    for column_index, epoch in enumerate(epochs):
+        panel = frame[frame["train_epochs"] == epoch]
+        configurations = panel.drop_duplicates("run").sort_values("train_center_weight")
+        run_order = configurations["run"].tolist()
+        labels = [f"center={value:g}" for value in configurations["train_center_weight"]]
+        for row_index, (metric, metric_title) in enumerate(METRICS):
+            axis = axes[row_index, column_index]
+            _plot_paired_metric(axis, panel, metric=metric, labels=labels, run_order=run_order)
+            axis.set_title(f"epoch={epoch}: {metric_title}")
+            if column_index == 0:
+                axis.set_ylabel(metric_title)
+            if row_index == 0 and column_index == len(epochs) - 1:
+                axis.legend()
     figure.suptitle(title, y=1.02)
+    figure.tight_layout()
+    figure.savefig(path, dpi=180)
+    plt.close(figure)
+
+
+def _plot_small_lr_metrics(frame: pd.DataFrame, path: Path, title: str) -> None:
+    """Compare LR/epoch choices within one small-LR mode/center group."""
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    configurations = frame.drop_duplicates("run").sort_values(["learning_rate", "train_epochs"])
+    run_order = configurations["run"].tolist()
+    labels = [f"lr={lr:g}\ne={epoch}" for lr, epoch in zip(configurations["learning_rate"], configurations["train_epochs"])]
+    figure, axes = plt.subplots(3, 1, figsize=(max(10, len(run_order) * 1.35), 12))
+    for axis, (metric, metric_title) in zip(axes, METRICS):
+        _plot_paired_metric(axis, frame, metric=metric, labels=labels, run_order=run_order)
+        axis.set_title(metric_title)
+    axes[0].legend()
+    figure.suptitle(title, y=1.01)
     figure.tight_layout()
     figure.savefig(path, dpi=180)
     plt.close(figure)
@@ -199,23 +239,20 @@ def _plot_loss_components(history: pd.DataFrame, path: Path, title: str) -> None
     import matplotlib.pyplot as plt
 
     runs = history["run"].drop_duplicates().tolist()
-    figure, axes = plt.subplots(2, 4, figsize=(24, 10), sharex=False)
-    for row_index, assignment in enumerate(("forget", "retain")):
-        for axis, component in zip(axes[row_index], COMPONENTS):
-            column = f"{assignment}_{component}"
-            for run_name in runs:
-                curve = history[history["run"] == run_name].sort_values("epoch")
-                axis.plot(curve["epoch"], curve[column], label=run_name, linewidth=1.4)
-            axis.set(
-                title=f"{assignment}: {component}",
-                xlabel="ascent epoch",
-                ylabel="epoch-end evaluation loss",
-            )
-            axis.grid(alpha=0.25)
-    handles, labels = axes[0, 0].get_legend_handles_labels()
-    figure.legend(handles, labels, loc="lower center", ncol=min(4, len(labels)), fontsize=7)
+    figure, axes = plt.subplots(1, 2, figsize=(15, 5))
+    for run_name in runs:
+        curve = history[history["run"] == run_name].sort_values("epoch")
+        axes[0].plot(curve["epoch"], curve["forget_task"], label="forget", color="tab:blue")
+        axes[0].plot(curve["epoch"], curve["retain_task"], label="retain", color="tab:orange")
+        for component, color in zip(COMPONENTS, ("tab:blue", "tab:orange", "tab:green", "tab:red")):
+            axes[1].plot(curve["epoch"], curve[f"forget_{component}"], label=component, color=color)
+    axes[0].set(title="Mean alignment loss", xlabel="ascent epoch", ylabel="loss")
+    axes[1].set(title="Forget loss components", xlabel="ascent epoch", ylabel="loss")
+    for axis in axes:
+        axis.grid(alpha=0.25)
+        axis.legend()
     figure.suptitle(title, y=1.01)
-    figure.tight_layout(rect=(0, 0.08, 1, 1))
+    figure.tight_layout()
     figure.savefig(path, dpi=180)
     plt.close(figure)
 
@@ -251,16 +288,25 @@ def main(args: argparse.Namespace) -> None:
     metrics = pd.DataFrame(metric_rows).sort_values(["grid", "run", "assignment"])
     metrics.to_csv(output_dir / "unlearned_vs_retrained_metrics.csv", index=False)
     for grid_label, frame in metrics.groupby("grid", sort=True):
-        group_columns = _metric_group_columns(grid_label)
-        for values, group in frame.groupby(group_columns, sort=True, dropna=False):
-            if not isinstance(values, tuple):
-                values = (values,)
-            tag = "_".join(f"{column}_{value:g}" if isinstance(value, float) else f"{column}_{value}" for column, value in zip(group_columns, values))
-            _plot_metrics(
-                group,
-                output_dir / f"metrics_{_safe_name(grid_label)}_{_safe_name(tag)}.png",
-                _group_title(grid_label, group_columns, values),
-            )
+        if "full_mini" in grid_label:
+            for mode in ("full", "mini"):
+                _plot_full_mini_metrics(
+                    frame,
+                    output_dir / f"metrics_{_safe_name(grid_label)}_{mode}.png",
+                    mode=mode,
+                    title=f"{grid_label}: {mode}",
+                )
+        else:
+            group_columns = _metric_group_columns(grid_label)
+            for values, group in frame.groupby(group_columns, sort=True, dropna=False):
+                if not isinstance(values, tuple):
+                    values = (values,)
+                tag = "_".join(f"{column}_{value:g}" if isinstance(value, float) else f"{column}_{value}" for column, value in zip(group_columns, values))
+                _plot_small_lr_metrics(
+                    group,
+                    output_dir / f"metrics_{_safe_name(grid_label)}_{_safe_name(tag)}.png",
+                    title=_group_title(grid_label, group_columns, values),
+                )
 
     if histories:
         all_history = pd.concat(histories, ignore_index=True)
