@@ -79,7 +79,10 @@ def _plot_history(history, path: Path, loss_scale: str) -> None:
     axes[1].set(title="Forget loss components", xlabel="ascent epoch", ylabel="loss")
     axes[1].legend()
     for axis in axes:
-        axis.set_yscale(loss_scale)
+        if loss_scale == "symlog":
+            axis.set_yscale("symlog", linthresh=1e-2)
+        else:
+            axis.set_yscale(loss_scale)
         axis.grid(alpha=0.25)
     fig.tight_layout()
     fig.savefig(path, dpi=180)
@@ -324,7 +327,7 @@ if __name__ == "__main__":
     parser.add_argument("--forget-weight", type=float, default=1.0)
     parser.add_argument("--max-grad-norm", type=float, default=0.0)
     parser.add_argument(
-        "--loss-scale", choices=("linear", "log"), default="log",
-        help="y-axis scale for the saved loss curve",
+        "--loss-scale", choices=("linear", "log", "symlog"), default="symlog",
+        help="y-axis scale for the saved loss curve; symlog retains a visible zero region",
     )
     unlearn(parser.parse_args())

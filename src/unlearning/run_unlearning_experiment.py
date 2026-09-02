@@ -102,7 +102,9 @@ def main(args: argparse.Namespace) -> None:
                 "--unlearned-checkpoint", str(checkpoint), "--retrained-checkpoint", str(retrained),
                 "--split-dir", str(split_dir), "--output-dir", str(evaluation_dir), "--device", args.device,
                 "--original-train-seed", str(args.original_train_seed), "--recon-weight", "0.2",
-                "--class-weight", "0.4", "--center-weight", "0.8",
+                # Evaluation must use the exact objective used for this run.
+                # Otherwise the epoch-0 history loss cannot equal baseline loss.
+                "--class-weight", "0.4", "--center-weight", str(center_weight),
             ], args.dry_run)
     if not args.dry_run:
         _aggregate(experiments, output_root)
