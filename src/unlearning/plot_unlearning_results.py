@@ -141,6 +141,9 @@ def _find_runs(experiment_label: str, experiment_root: Path, unit: str) -> tuple
         configuration = _run_configuration(run_dir, run_name, experiment_root)
         losses = pd.read_csv(loss_path)
         similarities = pd.read_csv(similarity_path)
+        # ``history.csv`` is the sample-weighted objective used by gradient
+        # ascent.  Its reference lines must therefore also be sample means.
+        # The metrics below may still use ``unit`` (patient by default).
         reference_losses = {
             f"{model}_{assignment}_{loss_name}": _one_value(
                 losses,
@@ -148,7 +151,7 @@ def _find_runs(experiment_label: str, experiment_root: Path, unit: str) -> tuple
                 model=model,
                 comparison=None,
                 column=loss_name,
-                unit=unit,
+                unit="sample",
             )
             for model in ("baseline", "retrained")
             for assignment in ("forget", "retain")
@@ -194,6 +197,24 @@ def _find_runs(experiment_label: str, experiment_root: Path, unit: str) -> tuple
         missing = required - set(history.columns)
         if missing:
             raise ValueError(f"history log missing {sorted(missing)}: {history_path}")
+        epoch_zero = history.loc[history["epoch"] == 0]
+        if len(epoch_zero) != 1:
+            raise ValueError(f"history must contain exactly one epoch=0 row: {history_path}")
+        # This is an invariant: gradient ascent begins from the baseline
+        # checkpoint, so its sample-mean epoch 0 must equal the separately
+        # evaluated baseline loss.  Do not silently draw incomparable curves.
+        for assignment in ("forget", "retain"):
+            for loss_name in ("task", *COMPONENTS):
+                logged = float(epoch_zero.iloc[0][f"{assignment}_{loss_name}"])
+                evaluated = reference_losses[f"baseline_{assignment}_{loss_name}"]
+                if not np.isclose(logged, evaluated, rtol=1e-5, atol=1e-7):
+                    raise ValueError(
+                        "baseline loss mismatch between history epoch 0 and "
+                        f"evaluation ({assignment=}, {loss_name=}, "
+                        f"history={logged:.8g}, evaluation={evaluated:.8g}). "
+                        "Re-run representation evaluation with the same checkpoint, "
+                        "split, loss weights, and source/target data."
+                    )
         history.insert(0, "run", run_name)
         history.insert(0, "experiment", experiment_label)
         for column, value in reversed(tuple(configuration.items())):
@@ -240,7 +261,9 @@ def _plot_center_metrics(frame: pd.DataFrame, path_prefix: Path, title: str) -> 
         plt.close(figure)
 
 
-def _plot_loss_components(history: pd.DataFrame, path: Path, title: str) -> None:
+def _plot_loss_components(
+    history: pd.DataFrame, path: Path, title: str, loss_scale: str
+) -> None:
     import matplotlib
 
     matplotlib.use("Agg")
@@ -254,14 +277,17 @@ def _plot_loss_components(history: pd.DataFrame, path: Path, title: str) -> None
         axes[0].plot(curve["epoch"], curve["retain_task"], label="retain", color="tab:orange")
         for component, color in zip(COMPONENTS, ("tab:blue", "tab:orange", "tab:green", "tab:red")):
             axes[1].plot(curve["epoch"], curve[f"forget_{component}"], label=component, color=color)
-    reference = history.iloc[0]
+    # The dotted baseline control comes from epoch 0 itself, rather than from
+    # a separately aggregated table.  It is therefore exactly the state from
+    # which this ascent trajectory started.
+    reference = history.loc[history["epoch"] == 0].iloc[0]
     axes[0].axhline(
         reference["baseline_forget_task"], color="tab:blue", linestyle=":",
-        label="baseline forget (final)",
+        label="baseline forget (epoch 0)",
     )
     axes[0].axhline(
         reference["baseline_retain_task"], color="tab:orange", linestyle=":",
-        label="baseline retain (final)",
+        label="baseline retain (epoch 0)",
     )
     axes[0].axhline(
         reference["retrained_forget_task"], color="tab:blue", linestyle="--",
@@ -274,15 +300,16 @@ def _plot_loss_components(history: pd.DataFrame, path: Path, title: str) -> None
     for component, color in zip(COMPONENTS, ("tab:blue", "tab:orange", "tab:green", "tab:red")):
         axes[1].axhline(
             reference[f"baseline_forget_{component}"], color=color, linestyle=":",
-            label=f"baseline {component} (final)",
+            label=f"baseline {component} (epoch 0)",
         )
         axes[1].axhline(
             reference[f"retrained_forget_{component}"], color=color, linestyle="--",
             label=f"retrained {component} (final)",
         )
-    axes[0].set(title="Mean alignment loss", xlabel="ascent epoch", ylabel="loss")
-    axes[1].set(title="Forget loss components", xlabel="ascent epoch", ylabel="loss")
+    axes[0].set(title="Mean alignment loss (sample mean)", xlabel="ascent epoch", ylabel="loss")
+    axes[1].set(title="Forget loss components (sample mean)", xlabel="ascent epoch", ylabel="loss")
     for axis in axes:
+        axis.set_yscale(loss_scale)
         axis.grid(alpha=0.25)
         axis.legend()
     figure.suptitle(title, y=1.01)
@@ -325,6 +352,7 @@ def main(args: argparse.Namespace) -> None:
                     group,
                     output_dir / f"loss_components_{_safe_name(experiment_label)}_{_safe_name(tag)}.png",
                     f"{experiment_label}: {tag}",
+                    args.loss_scale,
                 )
     else:
         print("[warning] no history.csv files were found; no loss-component plots were written")
@@ -339,4 +367,8 @@ if __name__ == "__main__":
     )
     parser.add_argument("--output-dir", required=True)
     parser.add_argument("--unit", choices=("patient", "sample"), default="patient")
+    parser.add_argument(
+        "--loss-scale", choices=("linear", "log"), default="log",
+        help="y-axis scale for loss curves; log makes multi-order ascent readable",
+    )
     main(parser.parse_args())

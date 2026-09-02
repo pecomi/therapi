@@ -62,7 +62,7 @@ def _validate_args(args: argparse.Namespace) -> None:
         raise ValueError("loss weights must be non-negative and at least one must be positive")
 
 
-def _plot_history(history, path: Path) -> None:
+def _plot_history(history, path: Path, loss_scale: str) -> None:
     import matplotlib
 
     matplotlib.use("Agg")
@@ -79,6 +79,7 @@ def _plot_history(history, path: Path) -> None:
     axes[1].set(title="Forget loss components", xlabel="ascent epoch", ylabel="loss")
     axes[1].legend()
     for axis in axes:
+        axis.set_yscale(loss_scale)
         axis.grid(alpha=0.25)
     fig.tight_layout()
     fig.savefig(path, dpi=180)
@@ -276,7 +277,7 @@ def unlearn(args: argparse.Namespace) -> None:
         writer = csv.DictWriter(handle, fieldnames=fieldnames)
         writer.writeheader()
         writer.writerows(history)
-    _plot_history(history, output_dir / "loss_curve.png")
+    _plot_history(history, output_dir / "loss_curve.png", args.loss_scale)
     summary = {
         "objective": "maximize_original_target_alignment_loss_on_forget_set",
         "step_mode": args.step_mode,
@@ -322,4 +323,8 @@ if __name__ == "__main__":
     parser.add_argument("--center-weight", type=float, default=0.8)
     parser.add_argument("--forget-weight", type=float, default=1.0)
     parser.add_argument("--max-grad-norm", type=float, default=0.0)
+    parser.add_argument(
+        "--loss-scale", choices=("linear", "log"), default="log",
+        help="y-axis scale for the saved loss curve",
+    )
     unlearn(parser.parse_args())
