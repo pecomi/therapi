@@ -18,7 +18,8 @@ METRICS = (
 )
 COMPONENTS = ("recon", "emb_class", "exp_class", "center")
 RUN_PATTERN = re.compile(
-    r"(?P<step_mode>mini)_epoch_(?P<epochs>\d+).*_center_(?P<center>[^_]+)$"
+    r"(?P<step_mode>mini)_epoch_(?P<epochs>\d+).*_center_(?P<center>[^_]+)"
+    r"(?:_unlearn_seed_(?P<unlearn_seed>\d+))?$"
 )
 
 
@@ -87,16 +88,20 @@ def _run_configuration(run_dir: Path, run_name: str, experiment_root: Path) -> d
             f"run name, got {run_name!r}"
         )
     center_tag = match.group("center").replace("p", ".").replace("m", "-")
-    lr_match = re.search(r"(?:^|/)mini_lr_([^/]+)", run_name)
+    # Old result roots used either ``mini_lr_0p0001`` or ``lr1e4``.  Prefer
+    # the per-run tag because it is unambiguous and survives a renamed root.
+    lr_match = re.search(r"_lr_(?P<lr>[0-9pm]+)_center_", run_name)
+    if not lr_match:
+        lr_match = re.search(r"(?:^|/)mini_lr_(?P<lr>[^/]+)", run_name)
     learning_rate = float("nan")
     if lr_match:
-        learning_rate = float(lr_match.group(1).replace("p", "."))
+        learning_rate = float(lr_match.group("lr").replace("p", ".").replace("m", "-"))
     return {
         "step_mode": match.group("step_mode"),
         "train_epochs": int(match.group("epochs")),
         "learning_rate": learning_rate,
         "train_center_weight": float(center_tag),
-        "unlearn_seed": 0,
+        "unlearn_seed": int(match.group("unlearn_seed") or 0),
     }
 
 
