@@ -18,7 +18,7 @@ import pandas as pd
 
 
 METRICS = (
-    ("task_gap", "Task gap |U - R|"),
+    ("task_difference", "Task loss difference: U - R"),
     ("linear_cka", "Linear CKA: U vs R"),
     ("frechet_latent_distance", "Frechet distance: U vs R"),
 )
@@ -141,6 +141,7 @@ def _find_runs(grid_label: str, grid_root: Path, unit: str) -> tuple[list[dict],
                     **configuration,
                     "assignment": assignment,
                     "task_gap": abs(unlearned_task - retrained_task),
+                    "task_difference": unlearned_task - retrained_task,
                     "unlearned_task": unlearned_task,
                     "retrained_task": retrained_task,
                     "linear_cka": _one_value(
@@ -192,6 +193,8 @@ def _plot_paired_metric(
         y = [values.loc[(run, assignment)] for run in run_order]
         axis.bar(x + offset, y, width=width, label=assignment, color=color)
     axis.set_xticks(x, labels, rotation=35, ha="right", fontsize=8)
+    if metric == "task_difference":
+        axis.axhline(0, color="black", linewidth=0.9)
     axis.grid(axis="y", alpha=0.25)
 
 
