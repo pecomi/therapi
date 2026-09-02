@@ -132,15 +132,12 @@ def unlearn(args: argparse.Namespace) -> None:
     _freeze(source_ae.decoder)
     _freeze(center)
     _freeze(target_encoder.decoder)
-    _freeze(emb_classifier)
-    _freeze(exp_classifier)
-    _freeze(source_ae.encoder)
     groups = [
-        # ("source_encoder", source_ae.encoder.parameters()),
+        ("source_encoder", source_ae.encoder.parameters()),
         ("target_Q", target_encoder.Q.parameters()),
         ("target_K", target_encoder.K.parameters()),
-        # ("latent_classifier", emb_classifier.parameters()),
-        # ("expression_classifier", exp_classifier.parameters()),
+        ("latent_classifier", emb_classifier.parameters()),
+        ("expression_classifier", exp_classifier.parameters()),
     ]
     groups = [(name, list(parameters)) for name, parameters in groups]
     trainable = [parameter for _, parameters in groups for parameter in parameters]
