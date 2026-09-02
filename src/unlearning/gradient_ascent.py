@@ -44,26 +44,6 @@ def _gradient_norm(parameters) -> float:
     ) ** 0.5
 
 
-def _window_diagnostics(
-    values: list[float], window: int, reference_loss: float
-) -> tuple[float | None, float | None]:
-    """Return baseline-normalized absolute slope and range for the latest window."""
-    if len(values) < window:
-        return None, None
-    recent = values[-window:]
-    x_mean = (window - 1) / 2
-    denominator = sum((index - x_mean) ** 2 for index in range(window))
-    mean_loss = sum(recent) / window
-    slope = sum(
-        (index - x_mean) * (value - mean_loss)
-        for index, value in enumerate(recent)
-    ) / denominator
-    # A fixed baseline scale prevents a linearly diverging loss from looking
-    # flat merely because its current magnitude has become large.
-    scale = max(abs(reference_loss), 1e-12)
-    return abs(slope) / scale, (max(recent) - min(recent)) / scale
-
-
 def _validate_args(args: argparse.Namespace) -> None:
     positive = {
         "epochs": args.epochs,
@@ -71,20 +51,10 @@ def _validate_args(args: argparse.Namespace) -> None:
         "eval_batch_size": args.eval_batch_size,
         "lr": args.lr,
         "forget_weight": args.forget_weight,
-        "plateau_window": args.plateau_window,
-        "min_forget_rise_rtol": args.min_forget_rise_rtol,
     }
     invalid = {name: value for name, value in positive.items() if value <= 0}
     if invalid:
         raise ValueError(f"arguments must be positive: {invalid}")
-    if args.plateau_window < 2:
-        raise ValueError("plateau_window must be at least 2")
-    if args.min_epochs < 1:
-        raise ValueError("min_epochs must be at least 1")
-    if args.patience < 0:
-        raise ValueError("patience must be non-negative")
-    if args.plateau_rtol < 0 or args.plateau_range_rtol < 0:
-        raise ValueError("plateau tolerances must be non-negative")
     if args.max_grad_norm < 0:
         raise ValueError("max_grad_norm must be non-negative")
     loss_weights = (args.recon_weight, args.class_weight, args.center_weight)
@@ -92,14 +62,14 @@ def _validate_args(args: argparse.Namespace) -> None:
         raise ValueError("loss weights must be non-negative and at least one must be positive")
 
 
-def _plot_history(history, selected_epoch: int, path: Path, args: argparse.Namespace) -> None:
+def _plot_history(history, path: Path) -> None:
     import matplotlib
 
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
     epochs = [row["epoch"] for row in history]
-    fig, axes = plt.subplots(1, 3, figsize=(17, 4.5))
+    fig, axes = plt.subplots(1, 2, figsize=(12, 4.5))
     axes[0].plot(epochs, [row["forget_task"] for row in history], label="forget")
     axes[0].plot(epochs, [row["retain_task"] for row in history], label="retain")
     axes[0].set(title="Mean alignment loss", xlabel="ascent epoch", ylabel="loss")
@@ -108,29 +78,7 @@ def _plot_history(history, selected_epoch: int, path: Path, args: argparse.Names
         axes[1].plot(epochs, [row[f"forget_{name}"] for row in history], label=name)
     axes[1].set(title="Forget loss components", xlabel="ascent epoch", ylabel="loss")
     axes[1].legend()
-    axes[2].plot(
-        epochs,
-        [row["plateau_window_relative_slope"] for row in history],
-        label="window |slope| / baseline",
-    )
-    axes[2].plot(
-        epochs,
-        [row["plateau_window_relative_range"] for row in history],
-        label="window range / baseline",
-    )
-    axes[2].axhline(
-        args.plateau_rtol, color="tab:blue", linestyle=":", label="slope tolerance"
-    )
-    axes[2].axhline(
-        args.plateau_range_rtol,
-        color="tab:orange",
-        linestyle=":",
-        label="range tolerance",
-    )
-    axes[2].set(title="Plateau diagnostics", xlabel="ascent epoch", ylabel="relative value")
-    axes[2].legend()
     for axis in axes:
-        axis.axvline(selected_epoch, color="black", linestyle="--", linewidth=1)
         axis.grid(alpha=0.25)
     fig.tight_layout()
     fig.savefig(path, dpi=180)
@@ -226,12 +174,6 @@ def unlearn(args: argparse.Namespace) -> None:
         "epoch": 0,
         "optimizer_steps": 0,
         "cumulative_optimizer_steps": 0,
-        "relative_forget_change": None,
-        "relative_forget_rise_from_baseline": 0.0,
-        "plateau_window_relative_slope": None,
-        "plateau_window_relative_range": None,
-        "plateau_eligible": False,
-        "plateau_count": 0,
         "gradient_norm": None,
         **{f"forget_{key}": value for key, value in baseline_forget.items()},
         **{f"retain_{key}": value for key, value in baseline_retain.items()},
@@ -245,13 +187,7 @@ def unlearn(args: argparse.Namespace) -> None:
     )
     print(f"[baseline] forget={baseline_forget['task']:.6f} retain={baseline_retain['task']:.6f}")
 
-    previous_loss = baseline_forget["task"]
-    baseline_loss = baseline_forget["task"]
-    evaluated_forget_losses = [baseline_loss]
-    plateau_count = 0
     cumulative_steps = 0
-    stop_reason = "max_epochs"
-    selected_epoch = args.epochs
 
     def optimizer_update():
         norms = {name: _gradient_norm(parameters) for name, parameters in groups}
@@ -302,30 +238,10 @@ def unlearn(args: argparse.Namespace) -> None:
         current_loss = forget_metrics["task"]
         if not math.isfinite(current_loss):
             raise RuntimeError(f"non-finite evaluated forget loss at epoch {epoch}")
-        relative_change = abs(current_loss - previous_loss) / max(abs(previous_loss), 1e-12)
-        relative_rise = (current_loss - baseline_loss) / max(abs(baseline_loss), 1e-12)
-        evaluated_forget_losses.append(current_loss)
-        window_slope, window_range = _window_diagnostics(
-            evaluated_forget_losses, args.plateau_window, baseline_loss
-        )
-        plateau_eligible = (
-            epoch >= args.min_epochs
-            and relative_rise >= args.min_forget_rise_rtol
-            and window_slope is not None
-            and window_slope <= args.plateau_rtol
-            and window_range <= args.plateau_range_rtol
-        )
-        plateau_count = plateau_count + 1 if plateau_eligible else 0
         history.append({
             "epoch": epoch,
             "optimizer_steps": optimizer_steps,
             "cumulative_optimizer_steps": cumulative_steps,
-            "relative_forget_change": relative_change,
-            "relative_forget_rise_from_baseline": relative_rise,
-            "plateau_window_relative_slope": window_slope,
-            "plateau_window_relative_range": window_range,
-            "plateau_eligible": plateau_eligible,
-            "plateau_count": plateau_count,
             "gradient_norm": gradient_norm,
             **{f"grad_{name}": value for name, value in group_norms.items()},
             **{f"forget_{key}": value for key, value in forget_metrics.items()},
@@ -333,24 +249,15 @@ def unlearn(args: argparse.Namespace) -> None:
         })
         print(
             f"[epoch {epoch}/{args.epochs}] forget={current_loss:.6f} "
-            f"retain={retain_metrics['task']:.6f} rel_change={relative_change:.3g} "
-            f"rise={relative_rise:.3g} window_slope={window_slope} "
-            f"window_range={window_range} steps={optimizer_steps} "
-            f"plateau={plateau_count}/{args.patience}"
+            f"retain={retain_metrics['task']:.6f} steps={optimizer_steps}"
         )
-        previous_loss = current_loss
-        if args.patience > 0 and plateau_count >= args.patience:
-            selected_epoch, stop_reason = epoch, "forget_loss_plateau"
-            break
-    else:
-        selected_epoch = args.epochs
 
     final_forget, final_retain = evaluate(forget_eval_loader), evaluate(retain_eval_loader)
     checkpoint_path = output_dir / f"THERAPI_aligner_{args.source}_{args.target}.pt"
     torch.save(
         {
             "epoch": checkpoint.get("epoch"),
-            "unlearning_epochs": selected_epoch,
+            "unlearning_epochs": args.epochs,
             "unlearning_optimizer_steps": cumulative_steps,
             "source_AE": source_ae.state_dict(),
             "target_weightencoder": target_encoder.state_dict(),
@@ -369,25 +276,14 @@ def unlearn(args: argparse.Namespace) -> None:
         writer = csv.DictWriter(handle, fieldnames=fieldnames)
         writer.writeheader()
         writer.writerows(history)
-    _plot_history(history, selected_epoch, output_dir / "loss_curve.png", args)
-    plateau_detected = stop_reason == "forget_loss_plateau"
+    _plot_history(history, output_dir / "loss_curve.png")
     summary = {
         "objective": "maximize_original_target_alignment_loss_on_forget_set",
         "step_mode": args.step_mode,
         "micro_batch_size": args.batch_size,
         "effective_batch_size": effective_batch,
         "optimizer_steps": cumulative_steps,
-        "selected_epoch": selected_epoch,
-        "selection_valid": plateau_detected,
-        "stop_reason": stop_reason,
-        "plateau_rule": {
-            "minimum_epochs": args.min_epochs,
-            "window": args.plateau_window,
-            "minimum_relative_rise_from_baseline": args.min_forget_rise_rtol,
-            "maximum_baseline_normalized_absolute_window_slope": args.plateau_rtol,
-            "maximum_baseline_normalized_window_range": args.plateau_range_rtol,
-            "consecutive_epochs": args.patience,
-        },
+        "completed_epochs": args.epochs,
         "center_source": center_source,
         "baseline_forget": baseline_forget,
         "baseline_retain_evaluation_only": baseline_retain,
@@ -398,12 +294,7 @@ def unlearn(args: argparse.Namespace) -> None:
     with (output_dir / "summary.json").open("w", encoding="utf-8") as handle:
         json.dump(summary, handle, indent=2, sort_keys=True)
         handle.write("\n")
-    print(f"[stop] epoch={selected_epoch} reason={stop_reason}")
-    if not plateau_detected:
-        print(
-            "[warning] no valid post-rise plateau was detected; inspect loss_curve.png "
-            "before treating the final checkpoint as a selected unlearning result"
-        )
+    print(f"[done] completed_epochs={args.epochs}")
     print(f"[done] checkpoint={checkpoint_path.resolve()} curve={(output_dir / 'loss_curve.png').resolve()}")
 
 
@@ -421,13 +312,7 @@ if __name__ == "__main__":
     parser.add_argument("--tissue-column", default="tissue_label")
     parser.add_argument("--info-id-column", default=None)
     parser.add_argument("--latent-dim", type=int, default=128)
-    parser.add_argument("--epochs", type=int, default=100)
-    parser.add_argument("--min-epochs", type=int, default=10)
-    parser.add_argument("--patience", type=int, default=5)
-    parser.add_argument("--plateau-rtol", type=float, default=1e-3)
-    parser.add_argument("--plateau-range-rtol", type=float, default=5e-3)
-    parser.add_argument("--plateau-window", type=int, default=5)
-    parser.add_argument("--min-forget-rise-rtol", type=float, default=1e-2)
+    parser.add_argument("--epochs", type=int, default=30)
     parser.add_argument("--step-mode", choices=("mini",), default="mini")
     parser.add_argument("--batch-size", type=int, default=64)
     parser.add_argument("--eval-batch-size", type=int, default=256)

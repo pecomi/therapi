@@ -16,6 +16,7 @@ FIXED_BATCH_SIZE, FIXED_LR, FIXED_EPOCHS = 128, 1e-4, 30
 
 
 def _tag(value: float) -> str:
+    """Stable legacy filename tag; 1e-4 is represented as 0p0001."""
     return format(value, "g").replace(".", "p").replace("-", "m")
 
 
@@ -76,7 +77,10 @@ def main(args: argparse.Namespace) -> None:
     if center_weight < 0:
         raise ValueError("center weight must be non-negative")
     for unlearn_seed in args.unlearn_seeds:
-        run_name = f"mini_epoch_{FIXED_EPOCHS:03d}_lr_{_tag(FIXED_LR)}_center_{_tag(center_weight)}_unlearn_seed_{unlearn_seed}"
+        run_name = (
+            f"mini_epoch_{FIXED_EPOCHS:03d}_lr_{_tag(FIXED_LR)}"
+            f"_center_{_tag(center_weight)}_unlearn_seed_{unlearn_seed}"
+        )
         run_dir = output_root / run_name
         checkpoint = run_dir / "ckpts" / checkpoint_name
         evaluation_dir = run_dir / "evaluation" / "representations"
@@ -88,7 +92,7 @@ def main(args: argparse.Namespace) -> None:
                 "--split-dir", str(split_dir), "--output-dir", str(run_dir), "--device", args.device,
                 "--original-train-seed", str(args.original_train_seed), "--unlearn-seed", str(unlearn_seed),
                 "--step-mode", "mini", "--batch-size", str(FIXED_BATCH_SIZE), "--lr", str(FIXED_LR),
-                "--epochs", str(FIXED_EPOCHS), "--patience", "0", "--recon-weight", "0.2",
+                "--epochs", str(FIXED_EPOCHS), "--recon-weight", "0.2",
                 "--class-weight", "0.4", "--center-weight", str(center_weight),
             ], args.dry_run)
         if not args.skip_evaluation:

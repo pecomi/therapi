@@ -26,7 +26,7 @@ def _parse_experiment(value: str) -> tuple[str, Path]:
     label, separator, path = value.partition("=")
     if not separator or not label or not path:
         raise argparse.ArgumentTypeError(
-            "--experiment must use LABEL=PATH, for example mini_center=run/unlearn_mini_lr1e4_epoch30_center0p8_seed0"
+            "--experiment must use LABEL=PATH, for example mini_center=run/unlearn_mini_center0p8_seed_replicates"
         )
     return label, Path(path)
 

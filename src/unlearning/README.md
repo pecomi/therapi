@@ -39,8 +39,7 @@ split을 학습 스크립트 안에서 다시 추출하면 실험 간 forget 환
 - source decoder와 center anchor는 고정한다. target loss 경로에 있는 source
   encoder, target Q/K/decoder, 두 tissue classifier는 업데이트한다.
 - mini-batch mode만 사용한다. Batch size는 128이며 mini-batch마다 update한다.
-- learning rate는 `1e-4`, ascent epoch은 30으로 고정한다. 자동 plateau 종료는
-  사용하지 않는다(`--patience 0`).
+- learning rate는 `1e-4`, ascent epoch은 30으로 고정하며 항상 30 epoch을 수행한다.
 
 ## 1. Patient-level forget/retain split 생성
 
@@ -117,8 +116,7 @@ python src/unlearning/gradient_ascent.py \
   --step-mode mini \
   --batch-size 128 \
   --lr 1e-4 \
-  --epochs 30 \
-  --patience 0
+  --epochs 30
 ```
 
 출력:
@@ -154,40 +152,10 @@ unlearned가 같은 기준으로 비교되고 gradient ascent가 실제 원본 �
 
 `history.csv`와 `loss_curve.png`의 값은 noisy mini-batch loss가 아니라 매
 epoch update 후 forget/retain 전체에서 다시 계산한 sample-weighted 평균이다.
-epoch 0은 baseline이다. 기본 설정에서는 최근 5개 평가 loss에 직선을 적합해
-정규화된 절대 기울기와 구간 변동폭을 계산한다. 다음 조건이 모두 만족된 상태가
-`patience` epoch 연속 유지되면 종료한다.
-
-```text
-epoch >= min_epochs
-(L_t - L_0) / max(abs(L_0), 1e-12) >= min_forget_rise_rtol
-abs(window slope) / max(abs(L_0), 1e-12) <= plateau_rtol
-(window max - window min) / max(abs(L_0), 1e-12)
-    <= plateau_range_rtol
-위 조건들이 patience epoch 연속 유지
-```
-
-즉 baseline 대비 의미 있는 상승이 먼저 확인되고, 단일 epoch의 우연한 작은
-변화가 아니라 최근 구간 전체가 평평해진 첫 지점을 선택한다. `loss_curve.png`의
-세 번째 패널은 window slope/range와 각 threshold를 표시하고, 검은 점선은 선택
-epoch이다. `history.csv`에도 `relative_forget_rise_from_baseline`,
-`plateau_window_relative_slope`, `plateau_window_relative_range`,
-`plateau_eligible`이 기록된다.
-
-중요하게, 이 목적함수의 MSE와 cross entropy는 위로 유계가 아니다. 따라서 순수
-gradient ascent가 수학적으로 특정 loss 값에 수렴한다고 보장할 수 없고, 실제
-곡선이 계속 상승하거나 폭발하면 plateau를 억지로 선택하면 안 된다. plateau가
-없으면 마지막 checkpoint와 곡선은 진단용으로 저장하지만 `summary.json`의
-`selection_valid`는 `false`, `stop_reason`은 `max_epochs`가 된다. 이 경우 해당
-checkpoint를 최종 unlearning 결과로 간주하지 말고 learning rate, clipping 또는
-retain utility 제약을 포함한 별도 실험 설계를 검토한다.
-
-처음에는 `--epochs 100 --patience 0`으로 전체 곡선을 얻는 것을 권장한다. 그
-곡선에서 baseline 대비 상승 폭과 plateau 구간의 noise를 확인한 뒤
-`min-forget-rise-rtol`, `plateau-rtol`, `plateau-range-rtol`을 정하고 자동 종료를
-켠다. 기본값 1%, 0.1%, 0.5%는 시작점일 뿐 데이터별 보편적 최적값은 아니다.
-retain loss가 급격히 함께 증가한다면 forget loss의 plateau만으로 좋은
-unlearning이라고 해석하면 안 된다.
+epoch 0은 baseline이며, early stopping 없이 지정한 30 epoch을 항상 수행한다.
+`loss_curve.png`는 mean alignment loss와 forget의 네 raw loss component만
+표시한다. MSE와 cross entropy는 위로 유계가 아니므로, curve의 발산 여부는
+사후 진단 지표로 해석한다.
 
 gradient가 실제로 발산해 non-finite가 되면 즉시 실패시킨다. clipping 비교가
 필요한 경우에만 예를 들어 `--max-grad-norm 1.0`을 지정한다.
@@ -424,7 +392,7 @@ python src/unlearning/run_unlearning_experiment.py \
   --baseline-checkpoint "run/baseline_seed0_3/ckpts/THERAPI_aligner_GDSC_TCGA.pt" \
   --retrained-checkpoint "run/retrain_5pct_seed0/ckpts/THERAPI_aligner_GDSC_TCGA.pt" \
   --split-dir "splits/random_patient_5pct_seed0" \
-  --output-root "run/ga_mini_center_lr1e4_epoch30_seed0" \
+  --output-root "run/unlearn_mini_center0p8_seed_replicates" \
   --device cuda:0 \
   --original-train-seed 0 \
   --unlearn-seed 0 \
