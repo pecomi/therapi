@@ -112,6 +112,18 @@ def _find_runs(grid_label: str, grid_root: Path, unit: str) -> tuple[list[dict],
         configuration = _run_configuration(run_dir, run_name)
         losses = pd.read_csv(loss_path)
         similarities = pd.read_csv(similarity_path)
+        retrained_reference = {
+            f"retrained_{assignment}_{loss_name}": _one_value(
+                losses,
+                assignment=assignment,
+                model="retrained",
+                comparison=None,
+                column=loss_name,
+                unit=unit,
+            )
+            for assignment in ("forget", "retain")
+            for loss_name in ("task", *COMPONENTS)
+        }
 
         for assignment in ("forget", "retain"):
             unlearned_task = _one_value(
@@ -155,6 +167,8 @@ def _find_runs(grid_label: str, grid_root: Path, unit: str) -> tuple[list[dict],
         history.insert(0, "grid", grid_label)
         for column, value in reversed(tuple(configuration.items())):
             history.insert(2, column, value)
+        for column, value in reversed(tuple(retrained_reference.items())):
+            history.insert(2, column, value)
         histories.append(history)
     return rows, histories
 
@@ -181,7 +195,7 @@ def _plot_paired_metric(
     axis.grid(axis="y", alpha=0.25)
 
 
-def _plot_full_mini_metrics(frame: pd.DataFrame, path: Path, *, mode: str, title: str) -> None:
+def _plot_full_mini_metrics(frame: pd.DataFrame, path_prefix: Path, *, mode: str, title: str) -> None:
     import matplotlib
 
     matplotlib.use("Agg")
@@ -189,29 +203,27 @@ def _plot_full_mini_metrics(frame: pd.DataFrame, path: Path, *, mode: str, title
 
     frame = frame[frame["step_mode"] == mode]
     epochs = sorted(frame["train_epochs"].unique())
-    figure, axes = plt.subplots(3, len(epochs), figsize=(5.5 * len(epochs), 12))
-    if len(epochs) == 1:
-        axes = axes[:, None]
-    for column_index, epoch in enumerate(epochs):
-        panel = frame[frame["train_epochs"] == epoch]
-        configurations = panel.drop_duplicates("run").sort_values("train_center_weight")
-        run_order = configurations["run"].tolist()
-        labels = [f"center={value:g}" for value in configurations["train_center_weight"]]
-        for row_index, (metric, metric_title) in enumerate(METRICS):
-            axis = axes[row_index, column_index]
+    for metric, metric_title in METRICS:
+        figure, axes = plt.subplots(1, len(epochs), figsize=(5.5 * len(epochs), 4.5))
+        if len(epochs) == 1:
+            axes = [axes]
+        for axis, epoch in zip(axes, epochs):
+            panel = frame[frame["train_epochs"] == epoch]
+            configurations = panel.drop_duplicates("run").sort_values("train_center_weight")
+            run_order = configurations["run"].tolist()
+            labels = [f"center={value:g}" for value in configurations["train_center_weight"]]
             _plot_paired_metric(axis, panel, metric=metric, labels=labels, run_order=run_order)
             axis.set_title(f"epoch={epoch}: {metric_title}")
-            if column_index == 0:
-                axis.set_ylabel(metric_title)
-            if row_index == 0 and column_index == len(epochs) - 1:
+            axis.set_ylabel(metric_title)
+            if epoch == epochs[-1]:
                 axis.legend()
-    figure.suptitle(title, y=1.02)
-    figure.tight_layout()
-    figure.savefig(path, dpi=180)
-    plt.close(figure)
+        figure.suptitle(title, y=1.02)
+        figure.tight_layout()
+        figure.savefig(path_prefix.with_name(f"{path_prefix.name}_{metric}.png"), dpi=180)
+        plt.close(figure)
 
 
-def _plot_small_lr_metrics(frame: pd.DataFrame, path: Path, title: str) -> None:
+def _plot_small_lr_metrics(frame: pd.DataFrame, path_prefix: Path, title: str) -> None:
     """Compare LR/epoch choices within one small-LR mode/center group."""
     import matplotlib
 
@@ -221,15 +233,15 @@ def _plot_small_lr_metrics(frame: pd.DataFrame, path: Path, title: str) -> None:
     configurations = frame.drop_duplicates("run").sort_values(["learning_rate", "train_epochs"])
     run_order = configurations["run"].tolist()
     labels = [f"lr={lr:g}\ne={epoch}" for lr, epoch in zip(configurations["learning_rate"], configurations["train_epochs"])]
-    figure, axes = plt.subplots(3, 1, figsize=(max(10, len(run_order) * 1.35), 12))
-    for axis, (metric, metric_title) in zip(axes, METRICS):
+    for metric, metric_title in METRICS:
+        figure, axis = plt.subplots(figsize=(max(10, len(run_order) * 1.35), 4.5))
         _plot_paired_metric(axis, frame, metric=metric, labels=labels, run_order=run_order)
         axis.set_title(metric_title)
-    axes[0].legend()
-    figure.suptitle(title, y=1.01)
-    figure.tight_layout()
-    figure.savefig(path, dpi=180)
-    plt.close(figure)
+        axis.legend()
+        figure.suptitle(title, y=1.01)
+        figure.tight_layout()
+        figure.savefig(path_prefix.with_name(f"{path_prefix.name}_{metric}.png"), dpi=180)
+        plt.close(figure)
 
 
 def _plot_loss_components(history: pd.DataFrame, path: Path, title: str) -> None:
@@ -246,6 +258,20 @@ def _plot_loss_components(history: pd.DataFrame, path: Path, title: str) -> None
         axes[0].plot(curve["epoch"], curve["retain_task"], label="retain", color="tab:orange")
         for component, color in zip(COMPONENTS, ("tab:blue", "tab:orange", "tab:green", "tab:red")):
             axes[1].plot(curve["epoch"], curve[f"forget_{component}"], label=component, color=color)
+    reference = history.iloc[0]
+    axes[0].axhline(
+        reference["retrained_forget_task"], color="tab:blue", linestyle="--",
+        label="retrained forget (final)",
+    )
+    axes[0].axhline(
+        reference["retrained_retain_task"], color="tab:orange", linestyle="--",
+        label="retrained retain (final)",
+    )
+    for component, color in zip(COMPONENTS, ("tab:blue", "tab:orange", "tab:green", "tab:red")):
+        axes[1].axhline(
+            reference[f"retrained_forget_{component}"], color=color, linestyle="--",
+            label=f"retrained {component} (final)",
+        )
     axes[0].set(title="Mean alignment loss", xlabel="ascent epoch", ylabel="loss")
     axes[1].set(title="Forget loss components", xlabel="ascent epoch", ylabel="loss")
     for axis in axes:
@@ -292,7 +318,7 @@ def main(args: argparse.Namespace) -> None:
             for mode in ("full", "mini"):
                 _plot_full_mini_metrics(
                     frame,
-                    output_dir / f"metrics_{_safe_name(grid_label)}_{mode}.png",
+                    output_dir / f"metrics_{_safe_name(grid_label)}_{mode}",
                     mode=mode,
                     title=f"{grid_label}: {mode}",
                 )
@@ -304,7 +330,7 @@ def main(args: argparse.Namespace) -> None:
                 tag = "_".join(f"{column}_{value:g}" if isinstance(value, float) else f"{column}_{value}" for column, value in zip(group_columns, values))
                 _plot_small_lr_metrics(
                     group,
-                    output_dir / f"metrics_{_safe_name(grid_label)}_{_safe_name(tag)}.png",
+                    output_dir / f"metrics_{_safe_name(grid_label)}_{_safe_name(tag)}",
                     title=_group_title(grid_label, group_columns, values),
                 )
 
