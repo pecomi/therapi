@@ -113,6 +113,12 @@ def main(args: argparse.Namespace) -> None:
     if not args.dry_run:
         _aggregate(experiments, output_root)
         _run([sys.executable, str(SCRIPT_DIR / "plot_unlearning_results.py"), "--experiment", f"mini_center={output_root}", "--output-dir", str(output_root / "plots")], False)
+        _run([
+            sys.executable, str(SCRIPT_DIR / "plot_first_ten_epochs.py"),
+            "--experiment", f"mini_center={output_root}",
+            "--output-dir", str(output_root / "plots_first10"),
+            "--max-epoch", "10",
+        ], False)
 
 
 if __name__ == "__main__":
