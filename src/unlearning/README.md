@@ -383,7 +383,7 @@ python src/unlearning/evaluate_representations.py \
   --data_dir data \
   --baseline-checkpoint "run/$BASELINE_RUN/ckpts/THERAPI_aligner_GDSC_TCGA.pt" \
   --unlearned-checkpoint "run/$UNLEARN_RUN/ckpts/THERAPI_aligner_GDSC_TCGA.pt" \
-  --retrained-checkpoint "run/$RETRAIN_RUN/ckpts/THERAPI_aligner_GDSC_TCGA.pt" \
+  --retrained-checkpoint "run/retrain_retain_5pct_seed0/ckpts/THERAPI_aligner_GDSC_TCGA.pt" \
   --split-dir "splits/$SPLIT_NAME" \
   --output-dir "run/$UNLEARN_RUN/evaluation/representations" \
   --device "$DEVICE" \
@@ -435,3 +435,101 @@ retain:
 probability 같은 부가 지표는 더 이상 계산하거나 출력하지 않는다. 같은 출력
 디렉터리를 재사용해도 이전 evaluator가 만든 `representation_change_*` 파일은
 평가 성공 후 제거하므로 구버전 지표와 섞이지 않는다.
+
+## 11. Full/mini × epoch × loss-weight 실험
+
+`run_experiment_grid.py`는 각 설정을 동일한 baseline에서 독립적으로 시작한다.
+각 run에 대해 gradient ascent와 representation 평가를 순서대로 실행한 뒤 모든
+결과를 하나의 표와 그림으로 합친다. 기존과 동일한 전체 trainable module을
+업데이트하며 `patience=0`을 사용해 지정한 epoch를 정확히 수행한다.
+
+Full mode는 forget 전체 평균 gradient로 epoch마다 optimizer step을 한 번
+수행한다. Mini mode는 forget sample 수를 `N_F`, batch size를 `B`라고 할 때
+epoch마다 `M=ceil(N_F/B)`번 step한다. 기본 설정은 다음과 같이 learning rate를
+자동으로 다르게 적용한다.
+
+```text
+full_lr = 1e-5
+mini_lr = full_lr / M
+```
+
+이는 epoch당 누적 이동 규모를 맞추기 위한 1차 근사다. Adam의 moment update와
+mini-batch gradient noise 때문에 두 방식이 수학적으로 완전히 같아지는 것은
+아니다. 실제 `M`, mode별 learning rate와 예상 누적 optimizer-step 수는
+`comparison_summary.csv`에 함께 기록된다. Mini learning rate를 직접 정하려면
+`--mini-lr`을 지정한다.
+
+### 11-1. 전체 center-weight 우선 실험
+
+아래 명령 하나가 full/mini, 10/20/30 epoch, center weight 0/0.1/0.4/0.8의
+모든 조합 24개를 학습하고 곧바로 평가한다. Device는 `cuda:0`을 사용한다.
+
+```bash
+python src/unlearning/run_experiment_grid.py \
+  --data_dir data \
+  --baseline-checkpoint "run/baseline_seed0_3/ckpts/THERAPI_aligner_GDSC_TCGA.pt" \
+  --retrained-checkpoint "run/retrain_retain_5pct_seed0/ckpts/THERAPI_aligner_GDSC_TCGA.pt" \
+  --split-dir "splits/random_patient_5pct_seed0" \
+  --output-root "run/ga_full_mini_center_grid_seed0" \
+  --device cuda:0 \
+  --original-train-seed 0 \
+  --unlearn-seed 0 \
+  --step-modes full mini \
+  --batch-size 128 \
+  --full-lr 1e-5 \
+  --epochs 10 20 30 \
+  --recon-weights 0.2 \
+  --class-weights 0.4 \
+  --center-weights 0 0.1 0.4 0.8
+```
+
+실제 GPU 실행 전에 24개 명령을 확인하려면 마지막에 `--dry-run`을 붙인다.
+
+Center weight가 작으면 gradient 크기와 forgetting 강도도 작아질 수 있다. 따라서
+retain 손상만 단독 비교하지 않고 forget CKA/Fréchet 및 parameter drift를 함께
+본다. 평가할 때는 모든 checkpoint에 원래 loss 가중치
+`recon=0.2`, `class=0.4`, `center=0.8`을 공통 적용하므로 `task` 값도 동일 척도다.
+
+### 11-2. 이후 다른 loss-weight ablation
+
+Center 실험에서 선택한 mode와 epoch를 고정한 뒤 recon 또는 class weight를 같은
+방식으로 바꿀 수 있다. 예를 들어 full, 20 epoch가 선택되었다면 다음과 같다.
+
+```bash
+python src/unlearning/run_experiment_grid.py \
+  --data_dir data \
+  --baseline-checkpoint "run/baseline_seed0_3/ckpts/THERAPI_aligner_GDSC_TCGA.pt" \
+  --retrained-checkpoint "run/$RETRAIN_RUN/ckpts/THERAPI_aligner_GDSC_TCGA.pt" \
+  --split-dir "splits/random_patient_5pct_seed0" \
+  --output-root "run/ga_loss_weight_grid_seed0" \
+  --device cuda:0 \
+  --step-modes full \
+  --batch-size 128 \
+  --full-lr 1e-5 \
+  --epochs 20 \
+  --recon-weights 0 0.1 0.2 0.4 \
+  --class-weights 0.2 0.4 0.8 \
+  --center-weights 0.8
+```
+
+위 예시는 12개 조합이다. Recon과 class를 동시에 바꾸면 interaction까지 포함한
+factorial ablation이 되므로, 계산량을 줄이려면 하나를 원래 값에 고정하고 다른
+하나만 먼저 바꾼다.
+
+각 output root에는 다음 파일이 생성된다.
+
+```text
+comparison_summary.csv
+comparison_summary.png
+all_loss_metrics.csv
+all_representation_similarity.csv
+model_size.csv
+parameter_drift.csv
+```
+
+`comparison_summary.csv`는 환자 단위 forget/retain loss와 핵심 CKA/Fréchet을 한
+행에 모은다. Forget에서는 `unlearned_vs_retrained`의 CKA가 높고 Fréchet 및 task
+gap이 작은 설정을 찾는다. Retain에서는 `baseline_vs_unlearned`의 CKA가 높고
+Fréchet 및 task change가 작은 설정을 찾는다. `model_size.csv`는 core parameter
+수와 weights 크기, gradient ascent가 업데이트하는 parameter 수를 기록한다.
+`parameter_drift.csv`는 baseline 대비 모듈별 relative L2 변화를 기록한다.
