@@ -184,10 +184,11 @@ python src/unlearning/retain_finetune.py \
 ```
 
 기본 loss는 unlearning과 같은 원본 target objective이며, 부호만 반대로 하여
-retain loss를 최소화한다. 현재 `gradient_ascent.py`와 대칭적으로 target Q/K만
-업데이트하고 source encoder, target decoder, 두 classifier, center는 고정한다.
-Early stopping 없이 정확히 30 epoch을 수행한다. 입력 checkpoint를 실수로
-덮어쓰지 않도록 `--output-dir`에는 반드시 별도 run을 지정해야 한다.
+retain loss를 최소화한다. 현재 `gradient_ascent.py`와 대칭적으로 source
+encoder, target Q/K, latent classifier, expression classifier를 업데이트하고
+source decoder, target decoder, center는 고정한다. Early stopping 없이 정확히
+30 epoch을 수행한다. 입력 checkpoint를 실수로 덮어쓰지 않도록
+`--output-dir`에는 반드시 별도 run을 지정해야 한다.
 
 출력:
 
@@ -201,7 +202,7 @@ run/unlearn_5pct_seed0_retain_ft30/ckpts/
 출력 checkpoint는 기존 aligner checkpoint key를 유지하므로 후속 embedding이나
 `analyze_aligned_representations.py`의 `--unlearned-checkpoint`에 그대로 전달할
 수 있다. `retain_finetune_history.csv`는 epoch 0의 입력 unlearned 상태와 매
-epoch의 forget/retain 전체-set loss 및 Q/K gradient norm을 기록한다.
+epoch의 forget/retain 전체-set loss 및 trainable group별 gradient norm을 기록한다.
 
 ## 4. Retain-only deletion retraining
 

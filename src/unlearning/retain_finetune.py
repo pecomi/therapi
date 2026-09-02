@@ -139,12 +139,10 @@ def retain_finetune(args: argparse.Namespace) -> None:
             f"reconstructed_from_original_train_seed_{args.original_train_seed}"
         )
 
-    # Match the current gradient-ascent implementation: only target Q/K changed
-    # during unlearning, so retain recovery updates the same parameter groups.
-    _freeze(source_ae)
+    # Match gradient_ascent.py: optimize the complete target-loss path while
+    # keeping the two decoders and the fixed center anchors unchanged.
+    _freeze(source_ae.decoder)
     _freeze(target_encoder.decoder)
-    _freeze(emb_classifier)
-    _freeze(exp_classifier)
     _freeze(center)
     source_ae.eval()
     target_encoder.eval()
@@ -152,8 +150,11 @@ def retain_finetune(args: argparse.Namespace) -> None:
     exp_classifier.eval()
     center.eval()
     groups = [
+        ("source_encoder", list(source_ae.encoder.parameters())),
         ("target_Q", list(target_encoder.Q.parameters())),
         ("target_K", list(target_encoder.K.parameters())),
+        ("latent_classifier", list(emb_classifier.parameters())),
+        ("expression_classifier", list(exp_classifier.parameters())),
     ]
     trainable = [parameter for _, parameters in groups for parameter in parameters]
     optimizer = torch.optim.Adam(
@@ -221,8 +222,11 @@ def retain_finetune(args: argparse.Namespace) -> None:
 
     cumulative_steps = 0
     for epoch in range(1, args.epochs + 1):
+        source_ae.encoder.train()
         target_encoder.Q.train()
         target_encoder.K.train()
+        emb_classifier.train()
+        exp_classifier.train()
         step_norms = []
         for target_gex, _, labels in retain_loader:
             optimizer.zero_grad(set_to_none=True)
