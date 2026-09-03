@@ -1,4 +1,4 @@
-"""Fine-tune an unlearned THERAPI aligner on the retain set only."""
+"""Joint forget-ascent and retain-descent updates from a baseline aligner."""
 
 from __future__ import annotations
 
@@ -63,8 +63,8 @@ def _validate_args(args: argparse.Namespace) -> None:
         )
 
 
-def retain_finetune(args: argparse.Namespace) -> None:
-    """Minimize the original target objective using retain samples only."""
+def joint_unlearn(args: argparse.Namespace) -> None:
+    """Minimize retain loss minus forget loss with equal group weights."""
     _validate_args(args)
     device = torch.device(args.device)
     data_dir = Path(args.data_dir)
@@ -78,7 +78,7 @@ def retain_finetune(args: argparse.Namespace) -> None:
     input_checkpoint = Path(args.checkpoint)
     if checkpoint_path.resolve() == input_checkpoint.resolve():
         raise ValueError(
-            "--output-dir would overwrite the input unlearned checkpoint; "
+            "--output-dir would overwrite the input baseline checkpoint; "
             "use a separate run directory"
         )
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -163,14 +163,20 @@ def retain_finetune(args: argparse.Namespace) -> None:
     )
     models = (source_ae, target_encoder, emb_classifier, exp_classifier)
 
-    set_seed(args.finetune_seed)
-    retain_loader = DataLoader(
-        Subset(target_dataset, retain_indices),
+    if len(retain_indices) < len(forget_indices):
+        raise ValueError(
+            "joint updates require at least as many retain samples as forget samples"
+        )
+
+    set_seed(args.unlearn_seed)
+    forget_loader = DataLoader(
+        Subset(target_dataset, forget_indices),
         batch_size=args.batch_size,
         shuffle=True,
         drop_last=False,
-        generator=torch.Generator().manual_seed(args.finetune_seed),
+        generator=torch.Generator().manual_seed(args.unlearn_seed),
     )
+    retain_generator = torch.Generator().manual_seed(args.unlearn_seed + 1)
     forget_eval_loader = DataLoader(
         Subset(target_dataset, forget_indices),
         batch_size=args.eval_batch_size,
@@ -202,21 +208,23 @@ def retain_finetune(args: argparse.Namespace) -> None:
             "optimizer_steps": 0,
             "cumulative_optimizer_steps": 0,
             "gradient_norm": None,
+            "joint_objective": input_retain["task"] - input_forget["task"],
             **{f"forget_{key}": value for key, value in input_forget.items()},
             **{f"retain_{key}": value for key, value in input_retain.items()},
         }
     ]
-    effective_batch = min(args.batch_size, len(retain_indices))
+    effective_batch = min(args.batch_size, len(forget_indices))
     print(
         f"[data] forget={len(forget_indices)} retain={len(retain_indices)} "
         f"micro_batch={args.batch_size}"
     )
     print(
-        f"[batch] optimizer_steps_per_epoch={len(retain_loader)} "
+        f"[batch] optimizer_steps_per_epoch={len(forget_loader)} "
+        f"paired_retain_samples_per_epoch={len(forget_indices)} "
         f"effective_batch<={effective_batch}"
     )
     print(
-        f"[input unlearned] forget={input_forget['task']:.6f} "
+        f"[input baseline] forget={input_forget['task']:.6f} "
         f"retain={input_retain['task']:.6f}"
     )
 
@@ -227,24 +235,59 @@ def retain_finetune(args: argparse.Namespace) -> None:
         target_encoder.K.train()
         emb_classifier.train()
         exp_classifier.train()
+
+        # Match the number and batch sizes of retain examples to the forget
+        # examples, so every step gives the two mean losses equal weight.
+        retain_positions = torch.randperm(
+            len(retain_indices), generator=retain_generator
+        )[: len(forget_indices)].tolist()
+        paired_retain_indices = [retain_indices[i] for i in retain_positions]
+        paired_retain_loader = DataLoader(
+            Subset(target_dataset, paired_retain_indices),
+            batch_size=args.batch_size,
+            shuffle=False,
+            drop_last=False,
+        )
         step_norms = []
-        for target_gex, _, labels in retain_loader:
+        for forget_batch, retain_batch in zip(forget_loader, paired_retain_loader):
             optimizer.zero_grad(set_to_none=True)
-            target_gex = target_gex.to(device)
-            labels = labels.to(device)
-            output = forward_aligner(models, target_gex, source_gex)
-            losses = alignment_losses(
-                output,
-                target_gex,
-                labels,
+            forget_gex, _, forget_labels = forget_batch
+            retain_gex, _, retain_labels = retain_batch
+            forget_gex = forget_gex.to(device)
+            forget_labels = forget_labels.to(device)
+            retain_gex = retain_gex.to(device)
+            retain_labels = retain_labels.to(device)
+
+            forget_output = forward_aligner(models, forget_gex, source_gex)
+            forget_losses = alignment_losses(
+                forget_output,
+                forget_gex,
+                forget_labels,
                 center,
                 args.recon_weight,
                 args.class_weight,
                 args.center_weight,
             )
-            objective = losses["task"]
-            if not torch.isfinite(objective):
-                raise RuntimeError(f"non-finite retain objective at epoch {epoch}")
+            retain_output = forward_aligner(models, retain_gex, source_gex)
+            retain_losses = alignment_losses(
+                retain_output,
+                retain_gex,
+                retain_labels,
+                center,
+                args.recon_weight,
+                args.class_weight,
+                args.center_weight,
+            )
+            objective = retain_losses["task"] - forget_losses["task"]
+            if not all(
+                torch.isfinite(value)
+                for value in (
+                    objective,
+                    forget_losses["task"],
+                    retain_losses["task"],
+                )
+            ):
+                raise RuntimeError(f"non-finite joint objective at epoch {epoch}")
             objective.backward()
 
             group_norms = {
@@ -271,16 +314,23 @@ def retain_finetune(args: argparse.Namespace) -> None:
         }
         forget_metrics = evaluate(forget_eval_loader)
         retain_metrics = evaluate(retain_eval_loader)
-        if not math.isfinite(retain_metrics["task"]):
-            raise RuntimeError(
-                f"non-finite evaluated retain loss at epoch {epoch}"
+        joint_objective = retain_metrics["task"] - forget_metrics["task"]
+        if not all(
+            math.isfinite(value)
+            for value in (
+                forget_metrics["task"],
+                retain_metrics["task"],
+                joint_objective,
             )
+        ):
+            raise RuntimeError(f"non-finite evaluated loss at epoch {epoch}")
         history.append(
             {
                 "epoch": epoch,
                 "optimizer_steps": optimizer_steps,
                 "cumulative_optimizer_steps": cumulative_steps,
                 "gradient_norm": gradient_norm,
+                "joint_objective": joint_objective,
                 **{
                     f"grad_{name}": value
                     for name, value in mean_group_norms.items()
@@ -292,42 +342,32 @@ def retain_finetune(args: argparse.Namespace) -> None:
         print(
             f"[epoch {epoch}/{args.epochs}] "
             f"forget={forget_metrics['task']:.6f} "
-            f"retain={retain_metrics['task']:.6f} steps={optimizer_steps}"
+            f"retain={retain_metrics['task']:.6f} "
+            f"joint={joint_objective:.6f} steps={optimizer_steps}"
         )
 
     final_forget = evaluate(forget_eval_loader)
     final_retain = evaluate(retain_eval_loader)
-    carried_metadata = {
-        key: checkpoint[key]
-        for key in (
-            "epoch",
-            "unlearning_epochs",
-            "unlearning_optimizer_steps",
-            "original_checkpoint",
-            "unlearning_config",
-        )
-        if key in checkpoint
-    }
     torch.save(
         {
-            **carried_metadata,
+            "epoch": checkpoint.get("epoch"),
             "source_AE": source_ae.state_dict(),
             "target_weightencoder": target_encoder.state_dict(),
             "emb_dis_classifier": emb_classifier.state_dict(),
             "exp_dis_classifier": exp_classifier.state_dict(),
             "center_criterion": center.state_dict(),
             "optimizer": optimizer.state_dict(),
-            "retain_finetune_epochs": args.epochs,
-            "retain_finetune_optimizer_steps": cumulative_steps,
-            "retain_finetune_input_checkpoint": str(input_checkpoint.resolve()),
-            "retain_finetune_split_dir": str(Path(args.split_dir).resolve()),
-            "retain_finetune_config": vars(args),
+            "joint_unlearning_epochs": args.epochs,
+            "joint_unlearning_optimizer_steps": cumulative_steps,
+            "baseline_checkpoint": str(input_checkpoint.resolve()),
+            "split_dir": str(Path(args.split_dir).resolve()),
+            "joint_unlearning_config": vars(args),
         },
         checkpoint_path,
     )
 
     fieldnames = list(dict.fromkeys(key for row in history for key in row))
-    with (output_dir / "retain_finetune_history.csv").open(
+    with (output_dir / "history.csv").open(
         "w", newline="", encoding="utf-8"
     ) as handle:
         writer = csv.DictWriter(handle, fieldnames=fieldnames)
@@ -335,24 +375,26 @@ def retain_finetune(args: argparse.Namespace) -> None:
         writer.writerows(history)
 
     summary = {
-        "objective": "minimize_original_target_alignment_loss_on_retain_set",
-        "input_checkpoint": str(input_checkpoint.resolve()),
+        "objective": "minimize_equal_weight_retain_loss_minus_forget_loss",
+        "baseline_checkpoint": str(input_checkpoint.resolve()),
         "checkpoint": str(checkpoint_path.resolve()),
         "split_dir": str(Path(args.split_dir).resolve()),
         "trainable_groups": [name for name, _ in groups],
+        "frozen_groups": ["source_decoder", "target_decoder", "center"],
+        "forget_coefficient": -1.0,
+        "retain_coefficient": 1.0,
+        "paired_retain_samples_per_epoch": len(forget_indices),
         "completed_epochs": args.epochs,
         "micro_batch_size": args.batch_size,
         "effective_batch_size": effective_batch,
         "optimizer_steps": cumulative_steps,
         "center_source": center_source,
-        "input_forget_evaluation_only": input_forget,
-        "input_retain": input_retain,
-        "final_forget_evaluation_only": final_forget,
+        "input_baseline_forget": input_forget,
+        "input_baseline_retain": input_retain,
+        "final_forget": final_forget,
         "final_retain": final_retain,
     }
-    with (output_dir / "retain_finetune_summary.json").open(
-        "w", encoding="utf-8"
-    ) as handle:
+    with (output_dir / "summary.json").open("w", encoding="utf-8") as handle:
         json.dump(summary, handle, indent=2, sort_keys=True)
         handle.write("\n")
 
@@ -368,22 +410,22 @@ if __name__ == "__main__":
     parser.add_argument(
         "--checkpoint",
         required=True,
-        help="unlearned THERAPI aligner checkpoint",
+        help="baseline THERAPI aligner checkpoint",
     )
     parser.add_argument("--split-dir", required=True)
     parser.add_argument("--output-dir", required=True)
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--original-train-seed", type=int, default=0)
-    parser.add_argument("--finetune-seed", type=int, default=0)
+    parser.add_argument("--unlearn-seed", type=int, default=0)
     parser.add_argument("--tissue-column", default="tissue_label")
     parser.add_argument("--info-id-column", default=None)
     parser.add_argument("--latent-dim", type=int, default=128)
     parser.add_argument("--epochs", type=int, default=30)
     parser.add_argument("--batch-size", type=int, default=128)
     parser.add_argument("--eval-batch-size", type=int, default=256)
-    parser.add_argument("--lr", type=float, default=1e-4)
+    parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--recon-weight", type=float, default=0.2)
     parser.add_argument("--class-weight", type=float, default=0.4)
     parser.add_argument("--center-weight", type=float, default=0.8)
     parser.add_argument("--max-grad-norm", type=float, default=0.0)
-    retain_finetune(parser.parse_args())
+    joint_unlearn(parser.parse_args())

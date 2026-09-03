@@ -160,49 +160,61 @@ epoch 0은 baseline이며, early stopping 없이 지정한 30 epoch을 항상 �
 gradient가 실제로 발산해 non-finite가 되면 즉시 실패시킨다. clipping 비교가
 필요한 경우에만 예를 들어 `--max-grad-norm 1.0`을 지정한다.
 
-### 3-1. Unlearned checkpoint의 retain fine-tuning (30 epochs)
+### 3-1. Forget ascent + retain descent joint update (30 epochs)
 
-Forget-only gradient ascent가 끝난 checkpoint에 retain recovery 단계를 이어
-붙이려면 다음처럼 실행한다. 이 단계는 unlearned checkpoint에서 시작하며
-retain sample만 optimizer update에 사용한다. Forget sample은 변화 확인을 위한
-evaluation에만 사용된다.
+Baseline checkpoint에서 시작해 매 optimizer step마다 forget loss는 최대화하고
+retain loss는 최소화하려면 다음처럼 실행한다. 기존 파일명을 유지하기 위해
+실행 파일은 `retain_finetune.py`지만, retain-only fine-tuning은 더 이상 수행하지
+않는다.
 
 ```bash
-RETAIN_FT_RUN=unlearn_5pct_seed0_retain_ft30
+JOINT_RUN=joint_unlearn_5pct_seed0
 
 python src/unlearning/retain_finetune.py \
   --data_dir data \
-  --checkpoint "run/$UNLEARN_RUN/ckpts/THERAPI_aligner_GDSC_TCGA.pt" \
+  --checkpoint "run/$BASELINE_RUN/ckpts/THERAPI_aligner_GDSC_TCGA.pt" \
   --split-dir "splits/$SPLIT_NAME" \
-  --output-dir "run/$RETAIN_FT_RUN" \
+  --output-dir "run/$JOINT_RUN" \
   --device "$DEVICE" \
   --original-train-seed 0 \
-  --finetune-seed 0 \
+  --unlearn-seed 0 \
   --batch-size 128 \
-  --lr 1e-4 \
+  --lr 1e-3 \
+  --center-weight 0.8 \
   --epochs 30
 ```
 
-기본 loss는 unlearning과 같은 원본 target objective이며, 부호만 반대로 하여
-retain loss를 최소화한다. 현재 `gradient_ascent.py`와 대칭적으로 source
-encoder, target Q/K, latent classifier, expression classifier를 업데이트하고
-source decoder, target decoder, center는 고정한다. Early stopping 없이 정확히
-30 epoch을 수행한다. 입력 checkpoint를 실수로 덮어쓰지 않도록
-`--output-dir`에는 반드시 별도 run을 지정해야 한다.
+한 update에서 최소화하는 목적함수는 별도 계수 없이 다음과 같다.
+
+```text
+L_joint = L_retain - L_forget
+```
+
+두 loss 모두 `0.2 * reconstruction + 0.4 * classification + 0.8 * center`를
+사용한다. 각 epoch에는 forget 전체를 한 번 사용하고, retain에서는 forget과
+같은 수의 sample을 무작위로 뽑아 batch 크기까지 일치시킨다. 따라서 각 step의
+두 batch mean은 동일한 1:1 비중이며 optimizer step 수는 forget-only
+gradient-ascent와 같다. Learning rate 기본값은 원본 aligner 학습과 같은
+`1e-3`이다.
+
+Source encoder, target Q/K, latent classifier, expression classifier를
+업데이트하고 source decoder, target decoder, center anchor는 고정한다. 입력
+baseline checkpoint를 실수로 덮어쓰지 않도록 `--output-dir`에는 반드시 별도
+run을 지정해야 한다.
 
 출력:
 
 ```text
-run/unlearn_5pct_seed0_retain_ft30/ckpts/
+run/joint_unlearn_5pct_seed0/ckpts/
 ├── THERAPI_aligner_GDSC_TCGA.pt
-├── retain_finetune_history.csv
-└── retain_finetune_summary.json
+├── history.csv
+└── summary.json
 ```
 
 출력 checkpoint는 기존 aligner checkpoint key를 유지하므로 후속 embedding이나
 `analyze_aligned_representations.py`의 `--unlearned-checkpoint`에 그대로 전달할
-수 있다. `retain_finetune_history.csv`는 epoch 0의 입력 unlearned 상태와 매
-epoch의 forget/retain 전체-set loss 및 trainable group별 gradient norm을 기록한다.
+수 있다. `history.csv`는 epoch 0의 baseline과 매 epoch의 forget/retain 전체-set
+loss, `L_joint`, trainable group별 gradient norm을 기록한다.
 
 ## 4. Retain-only deletion retraining
 
