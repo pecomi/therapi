@@ -191,11 +191,11 @@ L_joint = L_retain - L_forget
 ```
 
 두 loss 모두 `0.2 * reconstruction + 0.4 * classification + 0.8 * center`를
-사용한다. 각 epoch에는 forget 전체를 한 번 사용하고, retain에서는 forget과
-같은 수의 sample을 무작위로 뽑아 batch 크기까지 일치시킨다. 따라서 각 step의
-두 batch mean은 동일한 1:1 비중이며 optimizer step 수는 forget-only
-gradient-ascent와 같다. Learning rate 기본값은 원본 aligner 학습과 같은
-`1e-3`이다.
+사용한다. Retain 전체를 한 epoch의 기준으로 삼아 모든 retain sample을 한 번씩
+사용한다. 각 retain batch에는 동일한 크기의 forget batch를 replacement
+sampling하여 붙인다. 따라서 각 step의 두 batch mean은 동일한 1:1 비중이고,
+batch size 128과 retain sample 7,641개라면 epoch당 optimizer step은 60회다.
+Learning rate 기본값은 원본 aligner 학습과 같은 `1e-3`이다.
 
 Source encoder, target Q/K, latent classifier, expression classifier를
 업데이트하고 source decoder, target decoder, center anchor는 고정한다. 입력
@@ -208,13 +208,18 @@ run을 지정해야 한다.
 run/joint_unlearn_5pct_seed0/ckpts/
 ├── THERAPI_aligner_GDSC_TCGA.pt
 ├── history.csv
+├── loss_curve.png
 └── summary.json
 ```
 
 출력 checkpoint는 기존 aligner checkpoint key를 유지하므로 후속 embedding이나
 `analyze_aligned_representations.py`의 `--unlearned-checkpoint`에 그대로 전달할
-수 있다. `history.csv`는 epoch 0의 baseline과 매 epoch의 forget/retain 전체-set
-loss, `L_joint`, trainable group별 gradient norm을 기록한다.
+수 있다. `history.csv`는 실제 update 직전에 사용한 paired mini-batch의
+`train_forget_*`, `train_retain_*`, `train_joint_objective` 평균과, update 후 전체
+set으로 다시 계산한 `forget_*`, `retain_*`, `joint_objective`를 분리해서 기록한다.
+`loss_curve.png`는 실제 batch loss, 부호가 적용된 `+retain/-forget/joint`, 전체-set
+평가 loss를 각각 별도 패널로 표시한다. Joint objective가 음수가 될 수 있으므로
+기본 y축은 `symlog`다.
 
 ## 4. Retain-only deletion retraining
 

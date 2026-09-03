@@ -12,7 +12,7 @@ from pathlib import Path
 import pandas as pd
 import torch
 import torch.nn as nn
-from torch.utils.data import DataLoader, Subset
+from torch.utils.data import DataLoader, RandomSampler, Subset
 
 SRC_DIR = Path(__file__).resolve().parents[1]
 if str(SRC_DIR) not in sys.path:
@@ -30,6 +30,8 @@ from unlearning.objective import alignment_losses, evaluate_loader, forward_alig
 from unlearning.split import build_sample_table, load_manifest_indices
 from utils import set_seed
 
+LOSS_NAMES = ("task", "recon", "emb_class", "exp_class", "center")
+
 
 def _freeze(module: nn.Module) -> None:
     for parameter in module.parameters():
@@ -42,6 +44,86 @@ def _gradient_norm(parameters) -> float:
         for parameter in parameters
         if parameter.grad is not None
     ) ** 0.5
+
+
+def _plot_history(history, path: Path, loss_scale: str) -> None:
+    """Plot actual update losses separately from full-set evaluation losses."""
+    import matplotlib
+
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+
+    train_rows = [row for row in history if row["epoch"] > 0]
+    train_epochs = [row["epoch"] for row in train_rows]
+    eval_epochs = [row["epoch"] for row in history]
+    fig, axes = plt.subplots(1, 3, figsize=(18, 4.8))
+
+    axes[0].plot(
+        train_epochs,
+        [row["train_forget_task"] for row in train_rows],
+        label="forget batch loss",
+    )
+    axes[0].plot(
+        train_epochs,
+        [row["train_retain_task"] for row in train_rows],
+        label="retain batch loss",
+    )
+    axes[0].set(
+        title="Losses used during updates",
+        xlabel="epoch",
+        ylabel="mean pre-update batch loss",
+    )
+
+    axes[1].plot(
+        train_epochs,
+        [row["train_retain_task"] for row in train_rows],
+        label="+ retain",
+    )
+    axes[1].plot(
+        train_epochs,
+        [-row["train_forget_task"] for row in train_rows],
+        label="- forget",
+    )
+    axes[1].plot(
+        train_epochs,
+        [row["train_joint_objective"] for row in train_rows],
+        label="joint",
+        linewidth=2,
+    )
+    axes[1].axhline(0, color="black", linewidth=0.8, alpha=0.5)
+    axes[1].set(
+        title="Signed optimizer objective",
+        xlabel="epoch",
+        ylabel="retain - forget",
+    )
+
+    axes[2].plot(
+        eval_epochs,
+        [row["forget_task"] for row in history],
+        label="forget full set",
+    )
+    axes[2].plot(
+        eval_epochs,
+        [row["retain_task"] for row in history],
+        label="retain full set",
+    )
+    axes[2].set(
+        title="Post-epoch full-set evaluation",
+        xlabel="epoch",
+        ylabel="mean loss",
+    )
+
+    for index, axis in enumerate(axes):
+        scale = "symlog" if index == 1 and loss_scale == "log" else loss_scale
+        if scale == "symlog":
+            axis.set_yscale("symlog", linthresh=1e-2)
+        else:
+            axis.set_yscale(scale)
+        axis.grid(alpha=0.25)
+        axis.legend()
+    fig.tight_layout()
+    fig.savefig(path, dpi=180)
+    plt.close(fig)
 
 
 def _validate_args(args: argparse.Namespace) -> None:
@@ -163,20 +245,30 @@ def joint_unlearn(args: argparse.Namespace) -> None:
     )
     models = (source_ae, target_encoder, emb_classifier, exp_classifier)
 
-    if len(retain_indices) < len(forget_indices):
-        raise ValueError(
-            "joint updates require at least as many retain samples as forget samples"
-        )
-
     set_seed(args.unlearn_seed)
+    forget_dataset = Subset(target_dataset, forget_indices)
+    retain_dataset = Subset(target_dataset, retain_indices)
+    # Retain defines an epoch. Draw the same number of forget examples with
+    # replacement so every retain batch has an equally sized forget batch.
+    forget_sampler = RandomSampler(
+        forget_dataset,
+        replacement=True,
+        num_samples=len(retain_indices),
+        generator=torch.Generator().manual_seed(args.unlearn_seed),
+    )
     forget_loader = DataLoader(
-        Subset(target_dataset, forget_indices),
+        forget_dataset,
+        batch_size=args.batch_size,
+        sampler=forget_sampler,
+        drop_last=False,
+    )
+    retain_loader = DataLoader(
+        retain_dataset,
         batch_size=args.batch_size,
         shuffle=True,
         drop_last=False,
-        generator=torch.Generator().manual_seed(args.unlearn_seed),
+        generator=torch.Generator().manual_seed(args.unlearn_seed + 1),
     )
-    retain_generator = torch.Generator().manual_seed(args.unlearn_seed + 1)
     forget_eval_loader = DataLoader(
         Subset(target_dataset, forget_indices),
         batch_size=args.eval_batch_size,
@@ -208,19 +300,29 @@ def joint_unlearn(args: argparse.Namespace) -> None:
             "optimizer_steps": 0,
             "cumulative_optimizer_steps": 0,
             "gradient_norm": None,
+            **{
+                f"train_forget_{name}": None
+                for name in LOSS_NAMES
+            },
+            **{
+                f"train_retain_{name}": None
+                for name in LOSS_NAMES
+            },
+            "train_joint_objective": None,
             "joint_objective": input_retain["task"] - input_forget["task"],
             **{f"forget_{key}": value for key, value in input_forget.items()},
             **{f"retain_{key}": value for key, value in input_retain.items()},
         }
     ]
-    effective_batch = min(args.batch_size, len(forget_indices))
+    effective_batch = min(args.batch_size, len(retain_indices))
     print(
         f"[data] forget={len(forget_indices)} retain={len(retain_indices)} "
         f"micro_batch={args.batch_size}"
     )
     print(
-        f"[batch] optimizer_steps_per_epoch={len(forget_loader)} "
-        f"paired_retain_samples_per_epoch={len(forget_indices)} "
+        f"[batch] optimizer_steps_per_epoch={len(retain_loader)} "
+        f"retain_samples_per_epoch={len(retain_indices)} "
+        f"paired_forget_draws_per_epoch={len(retain_indices)} "
         f"effective_batch<={effective_batch}"
     )
     print(
@@ -236,23 +338,18 @@ def joint_unlearn(args: argparse.Namespace) -> None:
         emb_classifier.train()
         exp_classifier.train()
 
-        # Match the number and batch sizes of retain examples to the forget
-        # examples, so every step gives the two mean losses equal weight.
-        retain_positions = torch.randperm(
-            len(retain_indices), generator=retain_generator
-        )[: len(forget_indices)].tolist()
-        paired_retain_indices = [retain_indices[i] for i in retain_positions]
-        paired_retain_loader = DataLoader(
-            Subset(target_dataset, paired_retain_indices),
-            batch_size=args.batch_size,
-            shuffle=False,
-            drop_last=False,
-        )
         step_norms = []
-        for forget_batch, retain_batch in zip(forget_loader, paired_retain_loader):
+        train_sums = {
+            assignment: {name: 0.0 for name in LOSS_NAMES}
+            for assignment in ("forget", "retain")
+        }
+        train_sample_count = 0
+        for forget_batch, retain_batch in zip(forget_loader, retain_loader):
             optimizer.zero_grad(set_to_none=True)
             forget_gex, _, forget_labels = forget_batch
             retain_gex, _, retain_labels = retain_batch
+            if len(forget_gex) != len(retain_gex):
+                raise RuntimeError("paired forget/retain batch sizes do not match")
             forget_gex = forget_gex.to(device)
             forget_labels = forget_labels.to(device)
             retain_gex = retain_gex.to(device)
@@ -288,6 +385,16 @@ def joint_unlearn(args: argparse.Namespace) -> None:
                 )
             ):
                 raise RuntimeError(f"non-finite joint objective at epoch {epoch}")
+
+            batch_size = len(forget_gex)
+            for name in LOSS_NAMES:
+                train_sums["forget"][name] += (
+                    forget_losses[name].detach().item() * batch_size
+                )
+                train_sums["retain"][name] += (
+                    retain_losses[name].detach().item() * batch_size
+                )
+            train_sample_count += batch_size
             objective.backward()
 
             group_norms = {
@@ -312,6 +419,16 @@ def joint_unlearn(args: argparse.Namespace) -> None:
             name: sum(norms[name] for _, norms in step_norms) / optimizer_steps
             for name, _ in groups
         }
+        train_means = {
+            assignment: {
+                name: value / train_sample_count
+                for name, value in sums.items()
+            }
+            for assignment, sums in train_sums.items()
+        }
+        train_joint_objective = (
+            train_means["retain"]["task"] - train_means["forget"]["task"]
+        )
         forget_metrics = evaluate(forget_eval_loader)
         retain_metrics = evaluate(retain_eval_loader)
         joint_objective = retain_metrics["task"] - forget_metrics["task"]
@@ -330,6 +447,15 @@ def joint_unlearn(args: argparse.Namespace) -> None:
                 "optimizer_steps": optimizer_steps,
                 "cumulative_optimizer_steps": cumulative_steps,
                 "gradient_norm": gradient_norm,
+                **{
+                    f"train_forget_{name}": value
+                    for name, value in train_means["forget"].items()
+                },
+                **{
+                    f"train_retain_{name}": value
+                    for name, value in train_means["retain"].items()
+                },
+                "train_joint_objective": train_joint_objective,
                 "joint_objective": joint_objective,
                 **{
                     f"grad_{name}": value
@@ -343,7 +469,8 @@ def joint_unlearn(args: argparse.Namespace) -> None:
             f"[epoch {epoch}/{args.epochs}] "
             f"forget={forget_metrics['task']:.6f} "
             f"retain={retain_metrics['task']:.6f} "
-            f"joint={joint_objective:.6f} steps={optimizer_steps}"
+            f"train_joint={train_joint_objective:.6f} "
+            f"eval_joint={joint_objective:.6f} steps={optimizer_steps}"
         )
 
     final_forget = evaluate(forget_eval_loader)
@@ -373,6 +500,7 @@ def joint_unlearn(args: argparse.Namespace) -> None:
         writer = csv.DictWriter(handle, fieldnames=fieldnames)
         writer.writeheader()
         writer.writerows(history)
+    _plot_history(history, output_dir / "loss_curve.png", args.loss_scale)
 
     summary = {
         "objective": "minimize_equal_weight_retain_loss_minus_forget_loss",
@@ -383,11 +511,13 @@ def joint_unlearn(args: argparse.Namespace) -> None:
         "frozen_groups": ["source_decoder", "target_decoder", "center"],
         "forget_coefficient": -1.0,
         "retain_coefficient": 1.0,
-        "paired_retain_samples_per_epoch": len(forget_indices),
+        "retain_samples_per_epoch": len(retain_indices),
+        "paired_forget_draws_per_epoch": len(retain_indices),
         "completed_epochs": args.epochs,
         "micro_batch_size": args.batch_size,
         "effective_batch_size": effective_batch,
         "optimizer_steps": cumulative_steps,
+        "loss_curve": str((output_dir / "loss_curve.png").resolve()),
         "center_source": center_source,
         "input_baseline_forget": input_forget,
         "input_baseline_retain": input_retain,
@@ -428,4 +558,10 @@ if __name__ == "__main__":
     parser.add_argument("--class-weight", type=float, default=0.4)
     parser.add_argument("--center-weight", type=float, default=0.8)
     parser.add_argument("--max-grad-norm", type=float, default=0.0)
+    parser.add_argument(
+        "--loss-scale",
+        choices=("linear", "log", "symlog"),
+        default="symlog",
+        help="y-axis scale; signed objective always uses symlog when log is selected",
+    )
     joint_unlearn(parser.parse_args())
