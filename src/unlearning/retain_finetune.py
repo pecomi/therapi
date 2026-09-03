@@ -47,80 +47,34 @@ def _gradient_norm(parameters) -> float:
 
 
 def _plot_history(history, path: Path, loss_scale: str) -> None:
-    """Plot actual update losses separately from full-set evaluation losses."""
+    """Plot post-epoch full-set losses, matching gradient_ascent.py."""
     import matplotlib
 
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
 
-    train_rows = [row for row in history if row["epoch"] > 0]
-    train_epochs = [row["epoch"] for row in train_rows]
-    eval_epochs = [row["epoch"] for row in history]
-    fig, axes = plt.subplots(1, 3, figsize=(18, 4.8))
-
-    axes[0].plot(
-        train_epochs,
-        [row["train_forget_task"] for row in train_rows],
-        label="forget batch loss",
-    )
-    axes[0].plot(
-        train_epochs,
-        [row["train_retain_task"] for row in train_rows],
-        label="retain batch loss",
-    )
-    axes[0].set(
-        title="Losses used during updates",
-        xlabel="epoch",
-        ylabel="mean pre-update batch loss",
-    )
-
-    axes[1].plot(
-        train_epochs,
-        [row["train_retain_task"] for row in train_rows],
-        label="+ retain",
-    )
-    axes[1].plot(
-        train_epochs,
-        [-row["train_forget_task"] for row in train_rows],
-        label="- forget",
-    )
-    axes[1].plot(
-        train_epochs,
-        [row["train_joint_objective"] for row in train_rows],
-        label="joint",
-        linewidth=2,
-    )
-    axes[1].axhline(0, color="black", linewidth=0.8, alpha=0.5)
+    epochs = [row["epoch"] for row in history]
+    fig, axes = plt.subplots(1, 2, figsize=(12, 4.5))
+    axes[0].plot(epochs, [row["forget_task"] for row in history], label="forget")
+    axes[0].plot(epochs, [row["retain_task"] for row in history], label="retain")
+    axes[0].set(title="Mean alignment loss", xlabel="joint epoch", ylabel="loss")
+    axes[0].legend()
+    for name in ("recon", "emb_class", "exp_class", "center"):
+        axes[1].plot(
+            epochs,
+            [row[f"forget_{name}"] for row in history],
+            label=name,
+        )
     axes[1].set(
-        title="Signed optimizer objective",
-        xlabel="epoch",
-        ylabel="retain - forget",
+        title="Forget loss components", xlabel="joint epoch", ylabel="loss"
     )
-
-    axes[2].plot(
-        eval_epochs,
-        [row["forget_task"] for row in history],
-        label="forget full set",
-    )
-    axes[2].plot(
-        eval_epochs,
-        [row["retain_task"] for row in history],
-        label="retain full set",
-    )
-    axes[2].set(
-        title="Post-epoch full-set evaluation",
-        xlabel="epoch",
-        ylabel="mean loss",
-    )
-
-    for index, axis in enumerate(axes):
-        scale = "symlog" if index == 1 and loss_scale == "log" else loss_scale
-        if scale == "symlog":
+    axes[1].legend()
+    for axis in axes:
+        if loss_scale == "symlog":
             axis.set_yscale("symlog", linthresh=1e-2)
         else:
-            axis.set_yscale(scale)
+            axis.set_yscale(loss_scale)
         axis.grid(alpha=0.25)
-        axis.legend()
     fig.tight_layout()
     fig.savefig(path, dpi=180)
     plt.close(fig)
@@ -561,7 +515,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--loss-scale",
         choices=("linear", "log", "symlog"),
-        default="symlog",
-        help="y-axis scale; signed objective always uses symlog when log is selected",
+        default="log",
+        help="y-axis scale for the saved full-set loss curve",
     )
     joint_unlearn(parser.parse_args())

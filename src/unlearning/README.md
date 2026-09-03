@@ -217,9 +217,10 @@ run/joint_unlearn_5pct_seed0/ckpts/
 수 있다. `history.csv`는 실제 update 직전에 사용한 paired mini-batch의
 `train_forget_*`, `train_retain_*`, `train_joint_objective` 평균과, update 후 전체
 set으로 다시 계산한 `forget_*`, `retain_*`, `joint_objective`를 분리해서 기록한다.
-`loss_curve.png`는 실제 batch loss, 부호가 적용된 `+retain/-forget/joint`, 전체-set
-평가 loss를 각각 별도 패널로 표시한다. Joint objective가 음수가 될 수 있으므로
-기본 y축은 `symlog`다.
+`loss_curve.png`는 기존 `gradient_ascent.py`와 동일하게 epoch 0의 baseline 및
+각 epoch update 후 전체-set 평가만 표시한다. 왼쪽은 forget/retain mean task
+loss이고 오른쪽은 forget의 reconstruction, 두 classification, center raw
+component다. 기본 y축은 기존 plot과 같은 `log`다.
 
 ## 4. Retain-only deletion retraining
 
