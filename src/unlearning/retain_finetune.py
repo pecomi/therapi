@@ -30,8 +30,6 @@ from unlearning.objective import alignment_losses, evaluate_loader, forward_alig
 from unlearning.split import build_sample_table, load_manifest_indices
 from utils import set_seed
 
-LOSS_NAMES = ("task", "recon", "emb_class", "exp_class", "center")
-
 
 def _freeze(module: nn.Module) -> None:
     for parameter in module.parameters():
@@ -254,15 +252,6 @@ def joint_unlearn(args: argparse.Namespace) -> None:
             "optimizer_steps": 0,
             "cumulative_optimizer_steps": 0,
             "gradient_norm": None,
-            **{
-                f"train_forget_{name}": None
-                for name in LOSS_NAMES
-            },
-            **{
-                f"train_retain_{name}": None
-                for name in LOSS_NAMES
-            },
-            "train_joint_objective": None,
             "joint_objective": input_retain["task"] - input_forget["task"],
             **{f"forget_{key}": value for key, value in input_forget.items()},
             **{f"retain_{key}": value for key, value in input_retain.items()},
@@ -293,11 +282,6 @@ def joint_unlearn(args: argparse.Namespace) -> None:
         exp_classifier.train()
 
         step_norms = []
-        train_sums = {
-            assignment: {name: 0.0 for name in LOSS_NAMES}
-            for assignment in ("forget", "retain")
-        }
-        train_sample_count = 0
         for forget_batch, retain_batch in zip(forget_loader, retain_loader):
             optimizer.zero_grad(set_to_none=True)
             forget_gex, _, forget_labels = forget_batch
@@ -339,16 +323,6 @@ def joint_unlearn(args: argparse.Namespace) -> None:
                 )
             ):
                 raise RuntimeError(f"non-finite joint objective at epoch {epoch}")
-
-            batch_size = len(forget_gex)
-            for name in LOSS_NAMES:
-                train_sums["forget"][name] += (
-                    forget_losses[name].detach().item() * batch_size
-                )
-                train_sums["retain"][name] += (
-                    retain_losses[name].detach().item() * batch_size
-                )
-            train_sample_count += batch_size
             objective.backward()
 
             group_norms = {
@@ -373,16 +347,6 @@ def joint_unlearn(args: argparse.Namespace) -> None:
             name: sum(norms[name] for _, norms in step_norms) / optimizer_steps
             for name, _ in groups
         }
-        train_means = {
-            assignment: {
-                name: value / train_sample_count
-                for name, value in sums.items()
-            }
-            for assignment, sums in train_sums.items()
-        }
-        train_joint_objective = (
-            train_means["retain"]["task"] - train_means["forget"]["task"]
-        )
         forget_metrics = evaluate(forget_eval_loader)
         retain_metrics = evaluate(retain_eval_loader)
         joint_objective = retain_metrics["task"] - forget_metrics["task"]
@@ -401,15 +365,6 @@ def joint_unlearn(args: argparse.Namespace) -> None:
                 "optimizer_steps": optimizer_steps,
                 "cumulative_optimizer_steps": cumulative_steps,
                 "gradient_norm": gradient_norm,
-                **{
-                    f"train_forget_{name}": value
-                    for name, value in train_means["forget"].items()
-                },
-                **{
-                    f"train_retain_{name}": value
-                    for name, value in train_means["retain"].items()
-                },
-                "train_joint_objective": train_joint_objective,
                 "joint_objective": joint_objective,
                 **{
                     f"grad_{name}": value
@@ -423,8 +378,7 @@ def joint_unlearn(args: argparse.Namespace) -> None:
             f"[epoch {epoch}/{args.epochs}] "
             f"forget={forget_metrics['task']:.6f} "
             f"retain={retain_metrics['task']:.6f} "
-            f"train_joint={train_joint_objective:.6f} "
-            f"eval_joint={joint_objective:.6f} steps={optimizer_steps}"
+            f"joint={joint_objective:.6f} steps={optimizer_steps}"
         )
 
     final_forget = evaluate(forget_eval_loader)
@@ -473,6 +427,13 @@ def joint_unlearn(args: argparse.Namespace) -> None:
         "optimizer_steps": cumulative_steps,
         "loss_curve": str((output_dir / "loss_curve.png").resolve()),
         "center_source": center_source,
+        "unlearning_config": {
+            "step_mode": "joint",
+            "epochs": args.epochs,
+            "lr": args.lr,
+            "center_weight": args.center_weight,
+            "unlearn_seed": args.unlearn_seed,
+        },
         "input_baseline_forget": input_forget,
         "input_baseline_retain": input_retain,
         "final_forget": final_forget,

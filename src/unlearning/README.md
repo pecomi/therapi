@@ -85,8 +85,19 @@ run/baseline_seed0_3/ckpts/THERAPI_aligner_GDSC_TCGA.pt
 RUN_NAME="$BASELINE_RUN" \
 DEVICE="$DEVICE" \
 SEED=0 \
+SPLIT_DIR="splits/$SPLIT_NAME" \
 STAGES="aligner embed predictor test" \
 bash pipline.sh
+```
+
+`SPLIT_DIR`를 지정하면 baseline 학습에서 update 전 epoch 0과 각 epoch update 후
+forget/retain 전체 target loss를 기록한다. 이 인자는 loss 추적에만 쓰이고
+baseline의 학습 데이터나 optimizer update에는 영향을 주지 않는다.
+
+```text
+run/baseline_seed0_3/ckpts/history.csv
+run/baseline_seed0_3/ckpts/loss_curve.png
+run/baseline_seed0_3/log/*_THERAPI_aligner_GDSC_TCGA.log
 ```
 
 기존 run을 이어서 누락된 stage만 실행할 때는 `RESUME=1`을 반드시 지정한다.
@@ -214,13 +225,44 @@ run/joint_unlearn_5pct_seed0/ckpts/
 
 출력 checkpoint는 기존 aligner checkpoint key를 유지하므로 후속 embedding이나
 `analyze_aligned_representations.py`의 `--unlearned-checkpoint`에 그대로 전달할
-수 있다. `history.csv`는 실제 update 직전에 사용한 paired mini-batch의
-`train_forget_*`, `train_retain_*`, `train_joint_objective` 평균과, update 후 전체
-set으로 다시 계산한 `forget_*`, `retain_*`, `joint_objective`를 분리해서 기록한다.
+수 있다. `history.csv`는 매 epoch update 후 전체 set으로 다시 계산한
+`forget_*`, `retain_*`, `joint_objective = retain_task - forget_task`를 기록한다.
 `loss_curve.png`는 기존 `gradient_ascent.py`와 동일하게 epoch 0의 baseline 및
 각 epoch update 후 전체-set 평가만 표시한다. 왼쪽은 forget/retain mean task
 loss이고 오른쪽은 forget의 reconstruction, 두 classification, center raw
 component다. 기본 y축은 기존 plot과 같은 `log`다.
+
+Baseline과 retrained의 최종 loss를 같은 그림에 기준선으로 넣으려면 먼저 세
+checkpoint를 동일 evaluator로 평가한다.
+
+```bash
+python src/unlearning/evaluate_representations.py \
+  --data_dir data \
+  --baseline-checkpoint "run/$BASELINE_RUN/ckpts/THERAPI_aligner_GDSC_TCGA.pt" \
+  --unlearned-checkpoint "run/$JOINT_RUN/ckpts/THERAPI_aligner_GDSC_TCGA.pt" \
+  --retrained-checkpoint "run/$RETRAIN_RUN/ckpts/THERAPI_aligner_GDSC_TCGA.pt" \
+  --split-dir "splits/$SPLIT_NAME" \
+  --output-dir "run/$JOINT_RUN/evaluation/representations" \
+  --device "$DEVICE" \
+  --center-weight 0.8
+```
+
+그다음 기존 plotter에 joint run 디렉터리를 입력한다.
+
+```bash
+python src/unlearning/plot_unlearning_results.py \
+  --experiment "joint=run/$JOINT_RUN" \
+  --output-dir "run/$JOINT_RUN/evaluation/plots" \
+  --unit sample \
+  --loss-scale log
+```
+
+이 plotter는 joint epoch curve 위에 baseline final loss를 점선, retrained final
+loss를 파선으로 표시한다. 비교 그림은 unlearn run 아래에만 생성된다.
+
+새로 실행한 baseline과 retrain은 각각 자체 `loss_curve.png`도 저장한다. 단,
+수정 전에 이미 끝난 학습은 최종 checkpoint만으로 과거 epoch 곡선을 복원할 수
+없으므로 epoch별 곡선이 필요하면 해당 학습을 다시 실행해야 한다.
 
 ## 4. Retain-only deletion retraining
 
@@ -242,9 +284,24 @@ python src/unlearning/retrain.py \
 ```text
 run/retrain_retain_5pct_seed0/ckpts/THERAPI_aligner_GDSC_TCGA.pt
 run/retrain_retain_5pct_seed0/ckpts/history.csv
+run/retrain_retain_5pct_seed0/ckpts/loss_curve.png
 ```
 
 이 모델은 unlearning 결과가 근접해야 하는 deletion-retraining reference다.
+
+Baseline, retrain, unlearn의 `history.csv`는 같은 컬럼 정의를 사용한다.
+
+- `epoch=0`: 어떤 optimizer update도 하기 전의 모델
+- `epoch=N`: N번째 epoch의 모든 update가 끝난 모델
+- `forget_task`, `retain_task`: 고정된 전체 split에서 계산한 target objective의
+  sample mean
+- 마지막 행: 최종 저장 checkpoint의 forget/retain loss
+
+여기서 `mean`은 시간축 평균이 아니다. 한 시점의 모델을 전체 split에 적용한 뒤
+모든 sample loss를 합산해 sample 수로 나눈 집계 방식이다. 따라서 최종 비교에는
+마지막 미니배치 loss가 아니라 `history.csv` 마지막 행의 `forget_task`와
+`retain_task`를 사용한다. 오른쪽 loss plot의 `recon`, `emb_class`, `exp_class`,
+`center`는 가중치를 곱하기 전 raw component이고, 왼쪽 `task`만 원본 가중합이다.
 
 두 학습 스크립트의 `--output-dir`에는 run 디렉터리 또는 그 아래의 `ckpts`
 디렉터리를 줄 수 있다. `run/<RUN_NAME>`을 주면 스크립트가 `ckpts`를 자동으로

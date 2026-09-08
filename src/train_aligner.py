@@ -1,11 +1,16 @@
 import os
+from pathlib import Path
 
 import pandas as pd
 
 import torch
 import torch.nn as nn
+from torch.utils.data import DataLoader, Subset
 
 from model import *
+from unlearning.loss_history import plot_history, split_metrics_row, write_history
+from unlearning.objective import evaluate_loader
+from unlearning.split import build_sample_table, load_manifest_indices
 from utils import set_seed, Logger
 from center_loss import CenterLoss
 
@@ -18,12 +23,12 @@ def train_aligner(args):
     set_seed(args.seed, logger)
 
     # parameters
-    batch_size = 128
-    dim_latent = 128
-    lr = 1e-3
-    loss_a = 0.2
-    loss_b = 0.8
-    loss_c = 0.4
+    batch_size = args.batch_size
+    dim_latent = args.latent_dim
+    lr = args.lr
+    loss_a = args.recon_weight
+    loss_b = args.center_weight
+    loss_c = args.class_weight
 
     # load data
     source_data_dir = os.path.join(args.data_dir, f'{args.source}/{args.source}_gex.csv')
@@ -40,7 +45,11 @@ def train_aligner(args):
     target_unlabeled_info_df = pd.read_csv(target_unlabeled_info_dir)
 
     source_dataset = AlignerDataset(source_data_df, args.source, source_info_df['tissue_label'])
-    target_unlabeled_dataset = AlignerDataset(target_unlabeled_data_df, args.target, target_unlabeled_info_df['tissue_label'])
+    target_unlabeled_dataset = AlignerDataset(
+        target_unlabeled_data_df,
+        args.target,
+        target_unlabeled_info_df[args.tissue_column],
+    )
     target_unlabeled_dataloader = DataLoader(target_unlabeled_dataset, batch_size=batch_size, shuffle=True, drop_last=False, generator = torch.Generator().manual_seed(args.seed))
 
     # model
@@ -61,8 +70,53 @@ def train_aligner(args):
     if not os.path.exists('ckpts'):
         os.makedirs('ckpts', exist_ok=True)
 
+    # Optional split tracking does not participate in optimization. It evaluates
+    # the target loss on fixed, full forget/retain sets before training and after
+    # every completed epoch, using the same evaluator as the unlearning scripts.
+    history = []
+    forget_eval_loader = retain_eval_loader = None
+    models = (source_AE, target_weightencoder, emb_dis_classifier, exp_dis_classifier)
+    source_gex_eval = source_dataset.data.to(args.device)
+    if args.split_dir is not None:
+        sample_table = build_sample_table(
+            target_unlabeled_data_df,
+            target_unlabeled_info_df,
+            tissue_column=args.tissue_column,
+            info_id_column=args.info_id_column,
+        )
+        forget_indices, retain_indices = load_manifest_indices(sample_table, args.split_dir)
+        forget_eval_loader = DataLoader(
+            Subset(target_unlabeled_dataset, forget_indices),
+            batch_size=args.eval_batch_size,
+            shuffle=False,
+        )
+        retain_eval_loader = DataLoader(
+            Subset(target_unlabeled_dataset, retain_indices),
+            batch_size=args.eval_batch_size,
+            shuffle=False,
+        )
+
+        def evaluate(loader):
+            return evaluate_loader(
+                loader,
+                models,
+                center_criterion,
+                source_gex_eval,
+                loss_a,
+                loss_c,
+                loss_b,
+            )
+
+        initial_forget = evaluate(forget_eval_loader)
+        initial_retain = evaluate(retain_eval_loader)
+        history.append(split_metrics_row(0, initial_forget, initial_retain))
+        logger(
+            f'Epoch 0 (before update), target forget {initial_forget["task"]:.6f}, '
+            f'target retain {initial_retain["task"]:.6f}'
+        )
+
     # training
-    for epoch in range(199):
+    for epoch in range(args.epochs):
         source_AE.train()
         target_weightencoder.train()
         emb_dis_classifier.train()
@@ -113,7 +167,21 @@ def train_aligner(args):
         train_losses /= len(target_unlabeled_dataloader)
         g_losses /= len(target_unlabeled_dataloader)
         t_losses /= len(target_unlabeled_dataloader)
-        logger(f'Epoch {epoch+1}, Train loss {train_losses:.4f}, G_losses {G_losses:.4f}, T_losses {T_losses:.4f}')
+        message = (
+            f'Epoch {epoch+1}, mini-batch train mean {train_losses:.4f}, '
+            f'G_losses {g_losses:.4f}, T_losses {t_losses:.4f}'
+        )
+        if forget_eval_loader is not None:
+            forget_metrics = evaluate(forget_eval_loader)
+            retain_metrics = evaluate(retain_eval_loader)
+            history.append(
+                split_metrics_row(epoch + 1, forget_metrics, retain_metrics)
+            )
+            message += (
+                f', post-update target forget {forget_metrics["task"]:.6f}, '
+                f'target retain {retain_metrics["task"]:.6f}'
+            )
+        logger(message)
 
     # save model
     torch.save({'epoch': epoch,
@@ -124,6 +192,21 @@ def train_aligner(args):
                 'center_criterion': center_criterion.state_dict(),
                 'optimizer': optimizer.state_dict()
                 }, f'ckpts/{model_name}.pt')
+    if history:
+        history_path = Path('ckpts/history.csv')
+        curve_path = Path('ckpts/loss_curve.png')
+        write_history(history, history_path)
+        plot_history(
+            history,
+            curve_path,
+            args.loss_scale,
+            epoch_label='baseline training epoch',
+        )
+        logger(
+            f'Final post-update target mean: forget={history[-1]["forget_task"]:.6f}, '
+            f'retain={history[-1]["retain_task"]:.6f}; '
+            f'history={history_path}, curve={curve_path}'
+        )
    
     
 if __name__ == '__main__':
@@ -134,6 +217,20 @@ if __name__ == '__main__':
     parser.add_argument('--data_dir', type=str, default='../data/')
     parser.add_argument('--source', type=str, default='GDSC')
     parser.add_argument('--target', type=str, default='TCGA')
+    parser.add_argument('--split-dir', default=None)
+    parser.add_argument('--tissue-column', default='tissue_label')
+    parser.add_argument('--info-id-column', default=None)
+    parser.add_argument('--epochs', type=int, default=199)
+    parser.add_argument('--batch-size', type=int, default=128)
+    parser.add_argument('--eval-batch-size', type=int, default=256)
+    parser.add_argument('--latent-dim', type=int, default=128)
+    parser.add_argument('--lr', type=float, default=1e-3)
+    parser.add_argument('--recon-weight', type=float, default=0.2)
+    parser.add_argument('--center-weight', type=float, default=0.8)
+    parser.add_argument('--class-weight', type=float, default=0.4)
+    parser.add_argument(
+        '--loss-scale', choices=('linear', 'log', 'symlog'), default='log'
+    )
     
     args = parser.parse_args()
 

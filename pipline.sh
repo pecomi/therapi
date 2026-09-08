@@ -18,6 +18,7 @@ set -euo pipefail
 RUN_NAME=${RUN_NAME:-test4}
 DEVICE=${DEVICE:-cuda:3}
 SEED=${SEED:-0}
+SPLIT_DIR=${SPLIT_DIR:-}
 
 SOURCE=${SOURCE:-GDSC}
 TARGET=${TARGET:-TCGA}
@@ -40,6 +41,9 @@ SRC=$ROOT/src
 DATA=$ROOT/data
 CSG2A_CKPT=$ROOT/$CSG2A_CKPT
 STRING_EDGES=$ROOT/$STRING_EDGES
+if [ -n "$SPLIT_DIR" ] && [[ "$SPLIT_DIR" != /* ]]; then
+    SPLIT_DIR=$ROOT/$SPLIT_DIR
+fi
 
 RUN_DIR=$ROOT/run/$RUN_NAME
 if [ -d "$RUN_DIR" ] && [ "$RESUME" != 1 ]; then
@@ -69,6 +73,7 @@ done
     echo "git_commit    $(git -C "$ROOT" rev-parse --short HEAD 2>/dev/null || echo n/a)"
     echo "device        $DEVICE"
     echo "seed          $SEED"
+    echo "split_dir     ${SPLIT_DIR:-disabled}"
     echo "source/target $SOURCE / $TARGET"
     echo "csg2a_ckpt    $CSG2A_CKPT"
     echo "dose/time     $DOSE / $TIME"
@@ -94,12 +99,17 @@ cd "$RUN_DIR"
 # -------------------------------------------------------------- 1. aligner
 if has_stage aligner; then
     log "1/4 aligner: $SOURCE -> $TARGET"
-    "$PYTHON" "$SRC/train_aligner.py" \
-        --seed "$SEED" \
-        --device "$DEVICE" \
-        --data_dir "$RUN_DATA/" \
-        --source "$SOURCE" \
+    aligner_args=(
+        --seed "$SEED"
+        --device "$DEVICE"
+        --data_dir "$RUN_DATA/"
+        --source "$SOURCE"
         --target "$TARGET"
+    )
+    if [ -n "$SPLIT_DIR" ]; then
+        aligner_args+=(--split-dir "$SPLIT_DIR")
+    fi
+    "$PYTHON" "$SRC/train_aligner.py" "${aligner_args[@]}"
 fi
 
 # ------------------------------------------------------- 2. CSG2A embeddings
