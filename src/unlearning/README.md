@@ -164,6 +164,9 @@ unlearned가 같은 기준으로 비교되고 gradient ascent가 실제 원본 �
 `history.csv`와 `loss_curve.png`의 값은 noisy mini-batch loss가 아니라 매
 epoch update 후 forget/retain 전체에서 다시 계산한 sample-weighted 평균이다.
 epoch 0은 baseline이며, early stopping 없이 지정한 30 epoch을 항상 수행한다.
+두 파일은 전체 unlearning이 끝날 때까지 기다리지 않고 epoch 0에서 생성되며,
+각 epoch이 끝날 때마다 최신 post-update 값으로 갱신된다. 따라서 중간에 실행이
+종료되더라도 마지막으로 완료된 epoch까지의 이력과 그래프가 남는다.
 `loss_curve.png`는 mean alignment loss와 forget의 네 raw loss component만
 표시한다. MSE와 cross entropy는 위로 유계가 아니므로, curve의 발산 여부는
 사후 진단 지표로 해석한다.
@@ -230,7 +233,8 @@ run/joint_unlearn_5pct_seed0/ckpts/
 `loss_curve.png`는 기존 `gradient_ascent.py`와 동일하게 epoch 0의 baseline 및
 각 epoch update 후 전체-set 평가만 표시한다. 왼쪽은 forget/retain mean task
 loss이고 오른쪽은 forget의 reconstruction, 두 classification, center raw
-component다. 기본 y축은 기존 plot과 같은 `log`다.
+component다. 기본 y축은 기존 plot과 같은 `log`다. 이 파일과 `history.csv`도
+epoch 0에서 생성되고 매 joint epoch 종료 후 갱신된다.
 
 Baseline과 retrained의 최종 loss를 같은 그림에 기준선으로 넣으려면 먼저 세
 checkpoint를 동일 evaluator로 평가한다.

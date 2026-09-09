@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import csv
 import json
 import math
 import sys
@@ -26,6 +25,7 @@ from model import (
     SOURCE_AE,
     TARGET_weightencoder,
 )
+from unlearning.loss_history import write_history
 from unlearning.objective import alignment_losses, evaluate_loader, forward_aligner
 from unlearning.split import build_sample_table, load_manifest_indices
 from utils import set_seed
@@ -76,6 +76,12 @@ def _plot_history(history, path: Path, loss_scale: str) -> None:
     fig.tight_layout()
     fig.savefig(path, dpi=180)
     plt.close(fig)
+
+
+def _save_loss_outputs(history, output_dir: Path, loss_scale: str) -> None:
+    """Persist every completed epoch so partial runs still have a curve."""
+    write_history(history, output_dir / "history.csv")
+    _plot_history(history, output_dir / "loss_curve.png", loss_scale)
 
 
 def _validate_args(args: argparse.Namespace) -> None:
@@ -272,6 +278,11 @@ def joint_unlearn(args: argparse.Namespace) -> None:
         f"[input baseline] forget={input_forget['task']:.6f} "
         f"retain={input_retain['task']:.6f}"
     )
+    _save_loss_outputs(history, output_dir, args.loss_scale)
+    print(
+        f"[loss] initialized history={output_dir / 'history.csv'} "
+        f"curve={output_dir / 'loss_curve.png'}"
+    )
 
     cumulative_steps = 0
     for epoch in range(1, args.epochs + 1):
@@ -374,6 +385,7 @@ def joint_unlearn(args: argparse.Namespace) -> None:
                 **{f"retain_{key}": value for key, value in retain_metrics.items()},
             }
         )
+        _save_loss_outputs(history, output_dir, args.loss_scale)
         print(
             f"[epoch {epoch}/{args.epochs}] "
             f"forget={forget_metrics['task']:.6f} "
@@ -401,14 +413,7 @@ def joint_unlearn(args: argparse.Namespace) -> None:
         checkpoint_path,
     )
 
-    fieldnames = list(dict.fromkeys(key for row in history for key in row))
-    with (output_dir / "history.csv").open(
-        "w", newline="", encoding="utf-8"
-    ) as handle:
-        writer = csv.DictWriter(handle, fieldnames=fieldnames)
-        writer.writeheader()
-        writer.writerows(history)
-    _plot_history(history, output_dir / "loss_curve.png", args.loss_scale)
+    _save_loss_outputs(history, output_dir, args.loss_scale)
 
     summary = {
         "objective": "minimize_equal_weight_retain_loss_minus_forget_loss",
