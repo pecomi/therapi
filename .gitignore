@@ -1,6 +1,7 @@
 # Data and run artifacts (kept locally, not versioned)
 data/
 run/
+splits/
 
 # Large pretrained checkpoints
 src/embedding/CSG2A_LINCSpretrained_Landmark.pt
