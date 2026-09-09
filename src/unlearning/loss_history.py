@@ -3,36 +3,118 @@
 from __future__ import annotations
 
 import csv
+import math
 from pathlib import Path
 
 
-def split_metrics_row(epoch: int, forget: dict, retain: dict, **extra) -> dict:
-    """Build one standardized post-update (or epoch-zero) history row."""
+_CORE_HISTORY_FIELDS = (
+    "method",
+    "epoch",
+    "optimizer_steps",
+    "cumulative_optimizer_steps",
+    "train_objective",
+    "evaluation_objective",
+    "gradient_norm",
+)
+_PAIRED_METRICS = (
+    "task",
+    "recon",
+    "emb_class",
+    "exp_class",
+    "center",
+    "emb_accuracy",
+    "exp_accuracy",
+    "n_samples",
+)
+
+
+def split_metrics_row(
+    epoch: int,
+    forget: dict | None,
+    retain: dict | None,
+    *,
+    method: str,
+    optimizer_steps: int,
+    cumulative_optimizer_steps: int,
+    train_objective: float | None = None,
+    evaluation_objective: float | None = None,
+    gradient_norm: float | None = None,
+    **extra,
+) -> dict:
+    """Build the shared history row used by every aligner experiment.
+
+    ``train_objective`` is the arithmetic mean of the scalar objectives passed
+    to ``backward`` in this epoch. ``evaluation_objective`` is the same method
+    objective recomputed from sample means over the complete, fixed
+    forget/retain sets. Fields that do not apply to a method are left empty.
+    """
     return {
+        "method": method,
         "epoch": epoch,
+        "optimizer_steps": optimizer_steps,
+        "cumulative_optimizer_steps": cumulative_optimizer_steps,
+        "train_objective": train_objective,
+        "evaluation_objective": evaluation_objective,
+        "gradient_norm": gradient_norm,
         **extra,
-        **{f"forget_{name}": value for name, value in forget.items()},
-        **{f"retain_{name}": value for name, value in retain.items()},
+        **({f"forget_{name}": value for name, value in forget.items()} if forget else {}),
+        **({f"retain_{name}": value for name, value in retain.items()} if retain else {}),
     }
+
+
+def format_epoch_log(row: dict, total_epochs: int) -> str:
+    """Return one compact, method-independent console log line."""
+    parts = [
+        f"[{row['method']}]",
+        f"[epoch {int(row['epoch']):03d}/{total_epochs:03d}]",
+        f"steps={int(row['optimizer_steps'])}",
+        f"cumulative_steps={int(row['cumulative_optimizer_steps'])}",
+    ]
+    for key in (
+        "train_objective",
+        "evaluation_objective",
+        "forget_task",
+        "retain_task",
+        "gradient_norm",
+    ):
+        value = row.get(key)
+        if value is not None and isinstance(value, (int, float)) and math.isfinite(value):
+            parts.append(f"{key}={value:.6f}")
+    return " ".join(parts)
 
 
 def write_history(history: list[dict], path: Path) -> None:
     """Write heterogeneous history rows without dropping later columns."""
-    fieldnames = list(dict.fromkeys(key for row in history for key in row))
+    observed = list(dict.fromkeys(key for row in history for key in row))
+    paired_fields = [
+        f"{assignment}_{metric}"
+        for metric in _PAIRED_METRICS
+        for assignment in ("forget", "retain")
+    ]
+    fieldnames = [
+        *[field for field in _CORE_HISTORY_FIELDS if field in observed],
+        *[field for field in paired_fields if field in observed],
+        *[
+            field
+            for field in observed
+            if field not in _CORE_HISTORY_FIELDS and field not in paired_fields
+        ],
+    ]
     with path.open("w", newline="", encoding="utf-8") as handle:
         writer = csv.DictWriter(handle, fieldnames=fieldnames)
         writer.writeheader()
         writer.writerows(history)
 
 
-def plot_history(
+def _plot_history(
     history: list[dict],
     path: Path,
     loss_scale: str,
     *,
     epoch_label: str,
+    component_assignment: str,
 ) -> None:
-    """Plot the same full-set target losses used by gradient_ascent.py."""
+    """Plot full-set task losses and one assignment's raw components."""
     import matplotlib
 
     matplotlib.use("Agg")
@@ -51,11 +133,11 @@ def plot_history(
     for name in ("recon", "emb_class", "exp_class", "center"):
         axes[1].plot(
             epochs,
-            [row[f"forget_{name}"] for row in history],
+            [row[f"{component_assignment}_{name}"] for row in history],
             label=name,
         )
     axes[1].set(
-        title="Forget target loss components",
+        title=f"{component_assignment.capitalize()} target loss components",
         xlabel=epoch_label,
         ylabel="loss",
     )
@@ -69,3 +151,37 @@ def plot_history(
     figure.tight_layout()
     figure.savefig(path, dpi=180)
     plt.close(figure)
+
+
+def plot_history(
+    history: list[dict],
+    path: Path,
+    loss_scale: str,
+    *,
+    epoch_label: str,
+) -> None:
+    """Plot full-set task losses with forget-loss components."""
+    _plot_history(
+        history,
+        path,
+        loss_scale,
+        epoch_label=epoch_label,
+        component_assignment="forget",
+    )
+
+
+def plot_retain_history(
+    history: list[dict],
+    path: Path,
+    loss_scale: str,
+    *,
+    epoch_label: str,
+) -> None:
+    """Plot full-set task losses with retain-loss components."""
+    _plot_history(
+        history,
+        path,
+        loss_scale,
+        epoch_label=epoch_label,
+        component_assignment="retain",
+    )

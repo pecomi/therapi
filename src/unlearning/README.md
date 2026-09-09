@@ -1,573 +1,205 @@
-# THERAPI TCGA patient-level unlearning
+# THERAPI patient-level unlearning
 
-이 문서는 같은 TCGA patient split로 다음 세 실험을 실행하는 방법을
-정리한다.
+이 디렉터리는 THERAPI aligner에서 TCGA 환자 정보를 제거하기 위한 코드를
+담고 있다. 현재 구현한 unlearning 방법은 두 가지다.
 
-1. **Baseline**: 전체 TCGA로 학습한 원본 aligner
-2. **Unlearned**: baseline에 forget-only gradient ascent를 여러 epoch 적용
-3. **Retrained**: forget 환자를 처음부터 제외하고 다시 학습한 기준 모델
+- **NegGrad**: `gradient_ascent.py`
+- **NegGrad+**: `retain_finetune.py`
 
-모든 명령은 THERAPI 프로젝트 루트에서 실행한다.
+삭제 재학습 기준선은 `retrain.py`로 생성한다. 모든 명령은 프로젝트 루트에서
+실행하며, 세 방법은 반드시 동일한 split manifest를 사용해야 한다.
 
-```bash
-cd /home/young/unlearning/therapi/theraphi_add_embedding
-source unlearn/bin/activate
-```
+## 파일 역할
 
-실제 서버의 프로젝트 경로나 venv 이름이 다르면 위 두 경로만 바꾼다.
+| 파일 | 역할 | 기본 실행에 필요한가 |
+| --- | --- | --- |
+| `make_forget_split.py` | patient-level forget/retain manifest 생성 CLI | 필요 |
+| `split.py` | TCGA barcode 처리, 층화 분할, manifest 검증 | 필요 |
+| `objective.py` | aligner forward, 원본 target loss, 전체-set 평가 | 필요 |
+| `loss_history.py` | 공통 history row, console log, CSV와 curve 출력 | 필요 |
+| `gradient_ascent.py` | NegGrad 학습 | NegGrad에 필요 |
+| `retain_finetune.py` | NegGrad+ 학습. 파일명은 호환성을 위해 유지 | NegGrad+에 필요 |
+| `retrain.py` | forget sample을 제외한 scratch retraining | 기준선 생성 시 필요 |
+| `evaluate_representations.py` | baseline/unlearned/retrained 표현 평가 | 평가 시 선택 |
+| `plot_unlearning_results.py` | 평가 결과와 loss history 통합 plot | 평가 시 선택 |
 
-## 0. 공통 설정과 주의점
-
-아래 예시는 다음 이름을 사용한다.
-
-```bash
-BASELINE_RUN=baseline_seed0_3
-SPLIT_NAME=random_patient_5pct_seed0
-UNLEARN_RUN=unlearn_5pct_seed0
-RETRAIN_RUN=retrain_retain_5pct_seed0
-DEVICE=cuda:4
-```
-
-세 실험은 반드시 같은 `splits/$SPLIT_NAME/samples.csv`를 사용해야 한다.
-split을 학습 스크립트 안에서 다시 추출하면 실험 간 forget 환자가 달라질
-수 있으므로 허용하지 않는다.
-
-현재 unlearning 설정은 다음과 같다.
-
-- retain 데이터는 unlearning backpropagation에 사용하지 않는다.
-- center loss는 사용하지만 center parameter 자체는 고정한다.
-- source decoder와 center anchor는 고정한다. target loss 경로에 있는 source
-  encoder, target Q/K/decoder, 두 tissue classifier는 업데이트한다.
-- mini-batch mode만 사용한다. Batch size는 128이며 mini-batch마다 update한다.
-- learning rate는 `1e-4`, ascent epoch은 30으로 고정하며 항상 30 epoch을 수행한다.
-
-## 1. Patient-level forget/retain split 생성
-
-TCGA participant의 5%를 tissue-stratified 방식으로 forget에 배정한다.
-동일 participant의 여러 sample은 항상 같은 쪽에 들어간다.
+## 1. Forget/retain split
 
 ```bash
 python src/unlearning/make_forget_split.py \
-  --data_dir data \
+  --data-dir data \
   --forget-ratio 0.05 \
   --split-seed 0 \
-  --output-dir "splits/$SPLIT_NAME"
+  --output-dir splits/random_patient_5pct_seed0
 ```
 
-주요 출력은 다음과 같다.
+같은 TCGA participant에 속한 sample은 항상 같은 assignment를 갖는다. 생성된
+`samples.csv`를 baseline loss tracking, NegGrad, NegGrad+, retraining에 재사용한다.
+학습 스크립트 안에서는 split을 다시 추출하지 않는다.
+
+## 2. 공통 target loss
+
+세 스크립트의 target loss는 원본 aligner와 동일하다.
 
 ```text
-splits/random_patient_5pct_seed0/
-├── patients.csv
-├── samples.csv
-├── forget_patients.csv
-├── retain_patients.csv
-├── forget_samples.csv
-├── retain_samples.csv
-└── metadata.json
+L_target = recon_weight * reconstruction_MSE
+         + class_weight * (latent_tissue_CE + expression_tissue_CE)
+         + center_weight * center_loss
 ```
 
-`make_forget_split.py`는 실행용 CLI이고, 실제 barcode 처리·분할·검증 로직은
-`split.py`에 있다.
+기본값은 `recon_weight=0.2`, `class_weight=0.4`, `center_weight=0.8`이다.
+`history.csv`의 `forget_task`와 `retain_task`는 매 epoch이 끝난 후 고정된 전체
+forget/retain set에서 계산한 sample mean이다. 학습 mini-batch loss와 구분한다.
 
-## 2. Baseline 준비
+현재 두 unlearning 방법 모두 환자 정보가 흐르는 target-loss 경로만 갱신한다.
 
-이미 다음 checkpoint와 downstream 결과가 정상적으로 생성되었다면 baseline을
-다시 돌릴 필요가 없다.
+- 갱신: source encoder, target Q/K, latent tissue classifier, expression tissue classifier
+- 고정: source decoder, target decoder, center anchor
 
-```text
-run/baseline_seed0_3/ckpts/THERAPI_aligner_GDSC_TCGA.pt
-```
+이 범위는 현재 실험 의도에 따른 설정이다. GDSC source 성능 보존을 위한 추가
+제약이나 갱신 범위 변경은 별도 실험으로 다룬다.
 
-처음부터 baseline 전체 pipeline을 실행해야 한다면:
-
-```bash
-RUN_NAME="$BASELINE_RUN" \
-DEVICE="$DEVICE" \
-SEED=0 \
-SPLIT_DIR="splits/$SPLIT_NAME" \
-STAGES="aligner embed predictor test" \
-bash pipline.sh
-```
-
-`SPLIT_DIR`를 지정하면 baseline 학습에서 update 전 epoch 0과 각 epoch update 후
-forget/retain 전체 target loss를 기록한다. 이 인자는 loss 추적에만 쓰이고
-baseline의 학습 데이터나 optimizer update에는 영향을 주지 않는다.
-
-```text
-run/baseline_seed0_3/ckpts/history.csv
-run/baseline_seed0_3/ckpts/loss_curve.png
-run/baseline_seed0_3/log/*_THERAPI_aligner_GDSC_TCGA.log
-```
-
-기존 run을 이어서 누락된 stage만 실행할 때는 `RESUME=1`을 반드시 지정한다.
-
-```bash
-RUN_NAME="$BASELINE_RUN" \
-RESUME=1 \
-DEVICE="$DEVICE" \
-SEED=0 \
-STAGES="embed predictor test" \
-bash pipline.sh
-```
-
-## 3. Forget-only gradient-ascent unlearning
-
-원본 baseline checkpoint에서 시작한다.
+## 3. NegGrad
 
 ```bash
 python src/unlearning/gradient_ascent.py \
-  --data_dir data \
-  --checkpoint "run/$BASELINE_RUN/ckpts/THERAPI_aligner_GDSC_TCGA.pt" \
-  --split-dir "splits/$SPLIT_NAME" \
-  --output-dir "run/$UNLEARN_RUN" \
-  --device "$DEVICE" \
+  --data-dir data \
+  --checkpoint run/baseline/ckpts/THERAPI_aligner_GDSC_TCGA.pt \
+  --split-dir splits/random_patient_5pct_seed0 \
+  --output-dir run/neggrad_seed0 \
+  --device cuda:0 \
   --original-train-seed 0 \
-  --unlearn-seeds 0 1 2 3 4 \
-  --step-mode mini \
-  --batch-size 128 \
-  --lr 1e-4 \
+  --unlearn-seed 0 \
+  --batch-size 64 \
+  --lr 1e-5 \
   --epochs 30
 ```
 
-출력:
+최소화하는 목적함수는 다음과 같다.
 
 ```text
-run/unlearn_5pct_seed0/ckpts/THERAPI_aligner_GDSC_TCGA.pt
-run/unlearn_5pct_seed0/ckpts/history.csv
-run/unlearn_5pct_seed0/ckpts/summary.json
-run/unlearn_5pct_seed0/ckpts/loss_curve.png
+L_NegGrad = -L_forget
 ```
 
-### Batch 설정
+한 epoch은 shuffled forget loader 한 번이다. 따라서 forget sample이 `N_f`, batch
+size가 `B`이면 epoch당 optimizer step 수는 `ceil(N_f / B)`이다. Retain set은
+optimizer update에 사용하지 않고 full-set metric 계산에만 사용한다.
 
-각 mini-batch 직후 `optimizer.step()`을 실행한다. Forget sample 수가 401이면
-batch size 128에서 epoch당 4회의 Adam update가 발생한다. Forget/retain loss는
-각 epoch이 끝난 뒤 shuffle 없이 전체 set에서 다시 계산한다.
+`--step-mode`와 `--forget-weight`는 제거했다. 구현은 mini-batch NegGrad 한
+가지뿐이고, 목적 계수는 정의상 `-1`이므로 사용자 인자로 받을 필요가 없다.
 
-### Loss와 종료 epoch
+## 4. NegGrad+
 
-학습과 평가에는 원본 aligner의 target objective를 그대로 쓴다.
-
-```text
-L = 0.2 * reconstruction MSE
-  + 0.4 * (latent tissue CE + expression tissue CE)
-  + 0.8 * center loss
-```
-
-gene expression은 연속값이고 원본 학습도 reconstruction MSE를 사용하므로
-MSE를 유지한다. CE는 tissue 판별 정보, center loss는 같은 tissue latent의
-응집도를 측정한다. 이 세 항의 가중합을 그대로 사용해야 baseline, retrained,
-unlearned가 같은 기준으로 비교되고 gradient ascent가 실제 원본 학습 목적의
-역방향이 된다.
-
-`history.csv`와 `loss_curve.png`의 값은 noisy mini-batch loss가 아니라 매
-epoch update 후 forget/retain 전체에서 다시 계산한 sample-weighted 평균이다.
-epoch 0은 baseline이며, early stopping 없이 지정한 30 epoch을 항상 수행한다.
-두 파일은 전체 unlearning이 끝날 때까지 기다리지 않고 epoch 0에서 생성되며,
-각 epoch이 끝날 때마다 최신 post-update 값으로 갱신된다. 따라서 중간에 실행이
-종료되더라도 마지막으로 완료된 epoch까지의 이력과 그래프가 남는다.
-`loss_curve.png`는 mean alignment loss와 forget의 네 raw loss component만
-표시한다. MSE와 cross entropy는 위로 유계가 아니므로, curve의 발산 여부는
-사후 진단 지표로 해석한다.
-
-gradient가 실제로 발산해 non-finite가 되면 즉시 실패시킨다. clipping 비교가
-필요한 경우에만 예를 들어 `--max-grad-norm 1.0`을 지정한다.
-
-### 3-1. Forget ascent + retain descent joint update (30 epochs)
-
-Baseline checkpoint에서 시작해 매 optimizer step마다 forget loss는 최대화하고
-retain loss는 최소화하려면 다음처럼 실행한다. 기존 파일명을 유지하기 위해
-실행 파일은 `retain_finetune.py`지만, retain-only fine-tuning은 더 이상 수행하지
-않는다.
+기존 파일명 `retain_finetune.py`는 유지하지만 실제 동작은 retain-only
+fine-tuning이 아니라 NegGrad+다.
 
 ```bash
-JOINT_RUN=joint_unlearn_5pct_seed0
-
 python src/unlearning/retain_finetune.py \
-  --data_dir data \
-  --checkpoint "run/$BASELINE_RUN/ckpts/THERAPI_aligner_GDSC_TCGA.pt" \
-  --split-dir "splits/$SPLIT_NAME" \
-  --output-dir "run/$JOINT_RUN" \
-  --device "$DEVICE" \
+  --data-dir data \
+  --checkpoint run/baseline/ckpts/THERAPI_aligner_GDSC_TCGA.pt \
+  --split-dir splits/random_patient_5pct_seed0 \
+  --output-dir run/neggrad_plus_seed0 \
+  --device cuda:0 \
   --original-train-seed 0 \
   --unlearn-seed 0 \
   --batch-size 128 \
   --lr 1e-3 \
-  --center-weight 0.8 \
+  --beta 0.95 \
   --epochs 30
 ```
 
-한 update에서 최소화하는 목적함수는 별도 계수 없이 다음과 같다.
+각 optimizer step에서 최소화하는 실제 목적함수는 다음과 같다.
 
 ```text
-L_joint = L_retain - L_forget
+L_NegGrad+ = beta * L_retain - (1 - beta) * L_forget
 ```
 
-두 loss 모두 `0.2 * reconstruction + 0.4 * classification + 0.8 * center`를
-사용한다. Retain 전체를 한 epoch의 기준으로 삼아 모든 retain sample을 한 번씩
-사용한다. 각 retain batch에는 동일한 크기의 forget batch를 replacement
-sampling하여 붙인다. 따라서 각 step의 두 batch mean은 동일한 1:1 비중이고,
-batch size 128과 retain sample 7,641개라면 epoch당 optimizer step은 60회다.
-Learning rate 기본값은 원본 aligner 학습과 같은 `1e-3`이다.
+`beta`는 0 이상 1 이하이고 기본값은 `0.95`다. `history.csv`의
+`evaluation_objective`에는 전체-set mean으로 재계산한 위 목적함수가 기록된다.
+`train_objective`는 각 step에서 `backward()`에 전달한 scalar의 epoch 평균인
+보조 진단값이며, 실험 결과의 선택·비교에는 `evaluation_objective`를 사용한다.
 
-Source encoder, target Q/K, latent classifier, expression classifier를
-업데이트하고 source decoder, target decoder, center anchor는 고정한다. 입력
-baseline checkpoint를 실수로 덮어쓰지 않도록 `--output-dir`에는 반드시 별도
-run을 지정해야 한다.
+### Sampling과 재현성
 
-출력:
+Retain loader가 epoch 길이를 정한다. 모든 retain batch를 한 번 사용하고, forget
+loader가 먼저 끝나면 그 epoch에서 생성된 shuffled forget batch 순서를
+처음부터 반복한다.
 
 ```text
-run/joint_unlearn_5pct_seed0/ckpts/
-├── THERAPI_aligner_GDSC_TCGA.pt
-├── history.csv
-├── loss_curve.png
-└── summary.json
+for forget_batch, retain_batch in zip(cycle(forget_loader), retain_loader)
 ```
 
-출력 checkpoint는 기존 aligner checkpoint key를 유지하므로 후속 embedding이나
-`analyze_aligned_representations.py`의 `--unlearned-checkpoint`에 그대로 전달할
-수 있다. `history.csv`는 매 epoch update 후 전체 set으로 다시 계산한
-`forget_*`, `retain_*`, `joint_objective = retain_task - forget_task`를 기록한다.
-`loss_curve.png`는 기존 `gradient_ascent.py`와 동일하게 epoch 0의 baseline 및
-각 epoch update 후 전체-set 평가만 표시한다. 왼쪽은 forget/retain mean task
-loss이고 오른쪽은 forget의 reconstruction, 두 classification, center raw
-component다. 기본 y축은 기존 plot과 같은 `log`다. 이 파일과 `history.csv`도
-epoch 0에서 생성되고 매 joint epoch 종료 후 갱신된다.
+이는 매 epoch retain 크기만큼 새로운 forget sample을 replacement draw하는
+방식이 아니다. 첫 forget traversal에서 만들어진 batch 순서를 같은 epoch 안에서
+cycle한다. 다음 epoch에는 DataLoader의 generator state가 진행되어 새로운
+shuffle 순서가 결정적으로 생성된다. 같은 데이터, PyTorch 환경, seed에서는
+순서를 재현할 수 있다.
 
-Baseline과 retrained의 최종 loss를 같은 그림에 기준선으로 넣으려면 먼저 세
-checkpoint를 동일 evaluator로 평가한다.
+두 batch의 loss는 각각 batch mean으로 계산된 후 `beta`로 결합한다. 마지막
+partial batch의 sample 수가 서로 달라도 forget/retain 항의 계수는 `1-beta`와
+`beta`로 유지된다.
 
-```bash
-python src/unlearning/evaluate_representations.py \
-  --data_dir data \
-  --baseline-checkpoint "run/$BASELINE_RUN/ckpts/THERAPI_aligner_GDSC_TCGA.pt" \
-  --unlearned-checkpoint "run/$JOINT_RUN/ckpts/THERAPI_aligner_GDSC_TCGA.pt" \
-  --retrained-checkpoint "run/$RETRAIN_RUN/ckpts/THERAPI_aligner_GDSC_TCGA.pt" \
-  --split-dir "splits/$SPLIT_NAME" \
-  --output-dir "run/$JOINT_RUN/evaluation/representations" \
-  --device "$DEVICE" \
-  --center-weight 0.8
-```
+`summary.json`에는 다음 run 전체 처리량을 기록한다.
 
-그다음 기존 plotter에 joint run 디렉터리를 입력한다.
+- epoch/cumulative optimizer step 수
+- forget/retain batch 및 sample 노출 수
+- forget set 크기로 나눈 `effective_forget_passes`
 
-```bash
-python src/unlearning/plot_unlearning_results.py \
-  --experiment "joint=run/$JOINT_RUN" \
-  --output-dir "run/$JOINT_RUN/evaluation/plots" \
-  --unit sample \
-  --loss-scale log
-```
+NegGrad와 NegGrad+의 같은 epoch 수는 같은 연산량을 뜻하지 않는다. 예를 들어
+forget 401개, retain 7,641개, batch size 128이면 NegGrad는 epoch당 4 step,
+NegGrad+는 epoch당 60 step이다. 결과를 해석할 때 epoch뿐 아니라 step 수와 sample
+노출량을 함께 확인해야 한다.
 
-이 plotter는 joint epoch curve 위에 baseline final loss를 점선, retrained final
-loss를 파선으로 표시한다. 비교 그림은 unlearn run 아래에만 생성된다.
-
-새로 실행한 baseline과 retrain은 각각 자체 `loss_curve.png`도 저장한다. 단,
-수정 전에 이미 끝난 학습은 최종 checkpoint만으로 과거 epoch 곡선을 복원할 수
-없으므로 epoch별 곡선이 필요하면 해당 학습을 다시 실행해야 한다.
-
-## 4. Retain-only deletion retraining
-
-이 실험은 baseline checkpoint를 fine-tuning하지 않는다. 모델을 처음부터
-초기화하고 GDSC 전체와 retain TCGA만 사용해 원본 aligner와 같은 방식으로
-199 epochs 학습한다.
+## 5. Deletion retraining
 
 ```bash
 python src/unlearning/retrain.py \
-  --data_dir data \
-  --split-dir "splits/$SPLIT_NAME" \
-  --output-dir "run/$RETRAIN_RUN" \
-  --device "$DEVICE" \
+  --data-dir data \
+  --split-dir splits/random_patient_5pct_seed0 \
+  --output-dir run/retrain_seed0 \
+  --device cuda:0 \
   --seed 0
 ```
 
-출력:
+Baseline checkpoint에서 fine-tune하지 않는다. 무작위 초기화부터 시작하여 GDSC
+전체와 retain TCGA만으로 원본 `source loss + target loss` 학습을 반복한다.
+
+## 6. 공통 로그와 산출물
+
+학습 방법의 `history.csv`는 가능한 경우 다음 공통 필드를 사용한다.
+
+| 필드 | 의미 |
+| --- | --- |
+| `method` | `baseline`, `retrain`, `neggrad`, `neggrad_plus` |
+| `epoch` | 0은 update 전 상태, 1 이상은 완료된 epoch |
+| `optimizer_steps` | 해당 epoch의 update 수 |
+| `cumulative_optimizer_steps` | 누적 update 수 |
+| `train_objective` | optimizer 과정 확인용 batch objective 평균 |
+| `evaluation_objective` | 결과 비교에 쓰는 full-set mean 방법별 목적함수 |
+| `forget_*`, `retain_*` | 고정 split에서 계산한 full-set target metrics |
+| `gradient_norm` | optimizer update 전 step gradient norm의 epoch 평균 |
+
+`history.csv`의 paired metric column은 `forget_task`, `retain_task`,
+`forget_recon`, `retain_recon`, `forget_emb_class`, `retain_emb_class` 순서처럼
+동일 metric의 forget/retain 값을 나란히 저장한다.
+
+Baseline을 split 없이 학습하면 forget/retain 관련 칼럼은 비어 있고 loss curve는
+생성하지 않는다. Split을 주면 학습 데이터에는 영향을 주지 않고 metric만
+추가한다.
+
+각 run의 `ckpts/`에는 다음 파일이 생성된다.
 
 ```text
-run/retrain_retain_5pct_seed0/ckpts/THERAPI_aligner_GDSC_TCGA.pt
-run/retrain_retain_5pct_seed0/ckpts/history.csv
-run/retrain_retain_5pct_seed0/ckpts/loss_curve.png
+ckpts/
+├── THERAPI_aligner_GDSC_TCGA.pt
+├── history.csv
+├── loss_curve.png
+├── retain_loss_curve.png
+└── summary.json
 ```
 
-이 모델은 unlearning 결과가 근접해야 하는 deletion-retraining reference다.
-
-Baseline, retrain, unlearn의 `history.csv`는 같은 컬럼 정의를 사용한다.
-
-- `epoch=0`: 어떤 optimizer update도 하기 전의 모델
-- `epoch=N`: N번째 epoch의 모든 update가 끝난 모델
-- `forget_task`, `retain_task`: 고정된 전체 split에서 계산한 target objective의
-  sample mean
-- 마지막 행: 최종 저장 checkpoint의 forget/retain loss
-
-여기서 `mean`은 시간축 평균이 아니다. 한 시점의 모델을 전체 split에 적용한 뒤
-모든 sample loss를 합산해 sample 수로 나눈 집계 방식이다. 따라서 최종 비교에는
-마지막 미니배치 loss가 아니라 `history.csv` 마지막 행의 `forget_task`와
-`retain_task`를 사용한다. 오른쪽 loss plot의 `recon`, `emb_class`, `exp_class`,
-`center`는 가중치를 곱하기 전 raw component이고, 왼쪽 `task`만 원본 가중합이다.
-
-두 학습 스크립트의 `--output-dir`에는 run 디렉터리 또는 그 아래의 `ckpts`
-디렉터리를 줄 수 있다. `run/<RUN_NAME>`을 주면 스크립트가 `ckpts`를 자동으로
-추가하며, `run/<RUN_NAME>/ckpts`를 직접 주어도 중복으로 추가하지 않는다.
-
-## 5. Pipeline checkpoint 이름
-
-`gradient_ascent.py`와 `retrain.py`는 `pipline.sh`가 각 run에서 찾는 아래 이름으로
-checkpoint를 직접 저장한다.
-
-```text
-run/<RUN_NAME>/ckpts/THERAPI_aligner_GDSC_TCGA.pt
-```
-
-별도 복사나 이름 변경 없이 해당 run에서 바로 `STAGES="embed test"`를 실행할 수
-있다. Baseline, unlearned, retrained는 run 디렉터리가 다르므로 동일한 파일명을
-사용해도 서로 덮어쓰지 않는다.
-
-## 6. Predictor를 동일하게 유지
-
-`train_predictor.py`는 GDSC로 학습한다. 이번 비교에서는 predictor를 실험마다
-다시 학습하지 않고 baseline의 동일한 10-fold predictor checkpoint를 복사해
-사용하는 것을 권장한다. 그래야 결과 차이를 TCGA aligner/embedding 변화로
-해석할 수 있다.
-
-```bash
-cp run/$BASELINE_RUN/ckpts/THERAPI_predictor_CV*.pt \
-   "run/$UNLEARN_RUN/ckpts/"
-
-cp run/$BASELINE_RUN/ckpts/THERAPI_predictor_CV*.pt \
-   "run/$RETRAIN_RUN/ckpts/"
-```
-
-복사 여부를 확인한다.
-
-```bash
-ls "run/$UNLEARN_RUN/ckpts/"THERAPI_predictor_CV*.pt
-ls "run/$RETRAIN_RUN/ckpts/"THERAPI_predictor_CV*.pt
-```
-
-## 7. 실험별 TCGA embedding 생성 및 test
-
-unlearning과 retraining은 TCGA basal expression alignment를 바꾸므로 TCGA
-perturbation embedding은 반드시 실험별로 다시 생성한다. 반면 GDSC embedding과
-predictor는 동일하게 유지한다.
-
-### 7-1. Unlearned
-
-```bash
-RUN_NAME="$UNLEARN_RUN" \
-RESUME=1 \
-DEVICE="$DEVICE" \
-SEED=0 \
-STAGES="embed test" \
-bash pipline.sh
-```
-
-### 7-2. Retain-only retrained
-
-```bash
-RUN_NAME="$RETRAIN_RUN" \
-RESUME=1 \
-DEVICE="$DEVICE" \
-SEED=0 \
-STAGES="embed test" \
-bash pipline.sh
-```
-
-여기서 `STAGES`에 `aligner`를 넣으면 안 된다. 넣으면 준비한 unlearned 또는
-retrained checkpoint 대신 baseline aligner 학습이 다시 실행된다. 동일 predictor를
-사용하려면 `predictor`도 넣지 않는다.
-
-embedding stage는 각 run에 다음 파일을 만든다.
-
-```text
-run/<RUN_NAME>/data/TCGA/TCGA_perturbation_float16.npy
-run/<RUN_NAME>/data/TCGA/TCGA_perturbation_compound_float16.npy
-```
-
-test 결과는 다음 위치에 저장된다.
-
-```text
-run/<RUN_NAME>/output/THERAPI_test_TCGA.csv
-```
-
-## 8. 최종 비교 대상
-
-```text
-run/baseline_seed0_3/output/THERAPI_test_TCGA.csv
-run/unlearn_5pct_seed0/output/THERAPI_test_TCGA.csv
-run/retrain_retain_5pct_seed0/output/THERAPI_test_TCGA.csv
-```
-
-전체 TCGA metric뿐 아니라 `splits/$SPLIT_NAME/samples.csv`의 `assignment`를
-이용해 forget과 retain을 분리해서 평가해야 한다.
-
-기대하는 비교 방향은 다음과 같다.
-
-```text
-forget set:
-  Unlearned ≈ Retain-only retrained
-  Unlearned ≠ Baseline
-
-retain set:
-  Unlearned ≈ Baseline
-```
-
-권장 보고 항목:
-
-- 전체/forget/retain 각각의 AUC와 AUPRC
-- baseline 대비 forget 예측 변화량
-- baseline 대비 retain 예측 변화량
-- unlearned와 retain-only retrained 예측 사이의 거리
-- unlearning 전후 forget/retain aligner loss
-- gradient group norm 및 non-finite 여부
-
-현재 `test_TCGA.py`의 기본 metric은 전체 TCGA를 대상으로 한다. forget/retain
-분리 metric을 얻으려면 test prediction과 `samples.csv`를 patient ID 기준으로
-연결하는 별도 평가 단계가 필요하다.
-
-## 9. 실행 전 최종 체크리스트
-
-```bash
-test -f "run/$BASELINE_RUN/ckpts/THERAPI_aligner_GDSC_TCGA.pt"
-test -f "splits/$SPLIT_NAME/samples.csv"
-test -f src/embedding/CSG2A_LINCSpretrained_Landmark.pt
-test -f src/embedding/CSG2A/data/STRING_edges.csv
-python -c 'import torch, pandas, rdkit, sklearn; print(torch.cuda.is_available())'
-```
-
-각 pipeline 로그의 `[align]` 줄에서 실제로 사용된 checkpoint가 해당 run의
-`THERAPI_aligner_GDSC_TCGA.pt`인지 반드시 확인한다.
-
-## 10. Forget/retain aligner 평가
-
-같은 `TCGA_unlabeled`의 forget/retain 환자를 baseline, unlearned,
-retain-only retrained aligner 세 개에 모두 통과시킨다. 출력 지표는 연구 질문에
-직접 필요한 aligner loss와 latent geometry 비교만 사용한다.
-
-```bash
-python src/unlearning/evaluate_representations.py \
-  --data_dir data \
-  --baseline-checkpoint "run/$BASELINE_RUN/ckpts/THERAPI_aligner_GDSC_TCGA.pt" \
-  --unlearned-checkpoint "run/$UNLEARN_RUN/ckpts/THERAPI_aligner_GDSC_TCGA.pt" \
-  --retrained-checkpoint "run/retrain_retain_5pct_seed0/ckpts/THERAPI_aligner_GDSC_TCGA.pt" \
-  --split-dir "splits/$SPLIT_NAME" \
-  --output-dir "run/$UNLEARN_RUN/evaluation/representations" \
-  --device "$DEVICE" \
-  --original-train-seed 0
-```
-
-출력 파일:
-
-```text
-loss_metrics.csv
-representation_similarity.csv
-evaluation_summary.json
-```
-
-`loss_metrics.csv`는 baseline/unlearned/retrained 각각에 대해 forget/retain의
-평균 `task`, reconstruction MSE, 두 CE, center loss를 같은 함수로 계산한다.
-`unit=sample`은 모든 sample에 같은 가중치를 주고, `unit=patient`는 환자 내
-sample을 먼저 평균내어 sample 수가 많은 환자의 영향이 커지지 않게 한다.
-
-`representation_similarity.csv`에는 세 모델 쌍에 대한 latent 비교만 sample과
-patient 수준으로 기록된다.
-
-- **Linear CKA**: 동일 sample의 representation geometry 유사도다. 1에
-  가까울수록 두 모델이 sample 사이 관계를 비슷하게 보존한다. 좌표의 직교
-  회전과 isotropic scale에 비교적 강하므로 retraining으로 latent 좌표계가
-  바뀌어도 직접 RMSE보다 안정적이다.
-- **Fréchet latent distance**: latent를 Gaussian으로 근사해 평균과 공분산의
-  차이를 측정한 FID/FCD 방식의 거리다. 0에 가까울수록 분포가 비슷하다.
-  이미지 feature가 아니므로 엄밀히는 FID라 부르지 않고
-  `frechet_latent_distance`로 기록한다. 특히 FCD(Fréchet ChemNet Distance)는
-  생성 분자의 ChemNet feature용 지표인데 이 aligner는 분자를 생성하지 않으므로
-  그대로 적용하는 것은 부적절하다. Gaussian 가정과 표본 수에 민감하므로 CKA
-  및 task loss와 함께 해석한다.
-
-비교 쌍은 `baseline_vs_unlearned`, `baseline_vs_retrained`,
-`unlearned_vs_retrained` 세 가지다. 핵심 해석은 다음과 같다.
-
-```text
-forget:
-  unlearned_vs_retrained CKA가 높고 Frechet distance가 낮아야 함
-
-retain:
-  baseline_vs_unlearned CKA가 높고 Frechet distance가 낮아야 함
-  unlearned loss가 baseline loss와 비슷해야 함
-```
-
-`evaluation_summary.json`에는 사용한 checkpoint, split, sample/patient 수, loss
-가중치와 실제 보고 지표 목록만 기록된다. Attention JS, latent RMSE, true-class
-probability 같은 부가 지표는 더 이상 계산하거나 출력하지 않는다. 같은 출력
-디렉터리를 재사용해도 이전 evaluator가 만든 `representation_change_*` 파일은
-평가 성공 후 제거하므로 구버전 지표와 섞이지 않는다.
-
-### 10-1. Original/unlearned aligned representation post-hoc 분석
-
-재학습이나 unlearning 재실행 없이 두 checkpoint의 attention-weighted target
-latent만 비교하려면 다음 명령을 사용한다.
-
-```bash
-python src/unlearning/analyze_aligned_representations.py \
-  --data_dir data \
-  --original-checkpoint "run/$BASELINE_RUN/ckpts/THERAPI_aligner_GDSC_TCGA.pt" \
-  --unlearned-checkpoint "run/$UNLEARN_RUN/ckpts/THERAPI_aligner_GDSC_TCGA.pt" \
-  --split-dir "splits/$SPLIT_NAME" \
-  --output-dir "run/$UNLEARN_RUN/evaluation/aligned_representations" \
-  --device "$DEVICE"
-```
-
-분석 대상은 `TARGET_weightencoder.forward()`의 두 번째 반환값이다.
-
-```text
-target_latent = softmax(Q(target_gex) @ K(source_latent).T / sqrt(latent_dim))
-                @ source_latent
-```
-
-스크립트는 TCGA 전체 DataLoader를 `shuffle=False`로 한 번 순회하면서 같은
-행 순서로 original/unlearned 모델을 평가한다. 다음 파일만 새로 생성한다.
-
-```text
-aligned_representations/
-├── aligned_representations.npz
-├── aligned_representation_similarity.csv
-└── aligned_representation_summary.json
-```
-
-`aligned_representations.npz`에는 `row_index`, `sample_id`, `patient_id`,
-`assignment`, `original`, `unlearned`가 들어 있다. 뒤의 두 행렬은 각각
-`(n_samples, latent_dim)`이고 앞의 식별자 배열과 행 순서가 같다.
-`aligned_representation_similarity.csv`는 기존
-`evaluate_representations.py`의 Linear CKA와 Fréchet latent distance 구현을
-그대로 사용해 sample/patient 단위 forget/retain aggregate를 기록한다. center
-값이나 attention weight 자체의 지표는 계산하지 않는다.
-
-## 11. Fixed mini-batch center-loss ablation
-
-새 실험은 mini-batch gradient ascent만 사용한다. Batch size는 128, learning
-rate는 `1e-4`, ascent epoch은 30으로 고정하며, training center-loss weight만
-ablation한다. CSG2A, predictor, downstream test는 실행하지 않는다.
-
-```bash
-python src/unlearning/run_unlearning_experiment.py \
-  --data-dir data \
-  --baseline-checkpoint "run/baseline_seed0_3/ckpts/THERAPI_aligner_GDSC_TCGA.pt" \
-  --retrained-checkpoint "run/retrain_5pct_seed0/ckpts/THERAPI_aligner_GDSC_TCGA.pt" \
-  --split-dir "splits/random_patient_5pct_seed0" \
-  --output-root "run/unlearn_mini_center0p8_seed_replicates" \
-  --device cuda:0 \
-  --original-train-seed 0 \
-  --unlearn-seed 0 \
-  --center-weight 0.8
-```
-
-평가는 patient 단위의 signed task-loss difference
-`L_task(unlearned) - L_task(retrained)`, linear CKA, Fréchet distance만
-비교한다. Loss plot은 epoch별 forget/retain weighted task loss와 forget의 raw
-`recon`, `emb_class`, `exp_class`, `center` component를 표시한다. Baseline과
-retrained의 최종 forget/retain loss는 수평 기준선으로 함께 표시한다.
-
-Component curve에는 loss weight를 곱하지 않는다. 각 항이 자체적으로 어떻게
-변했는지 보기 위해 raw loss를 사용한다. 반면 task curve는 실제 objective이므로
-`0.2 recon + 0.4(emb_class + exp_class) + 0.8 center`의 가중합이다.
+`loss_curve.png`는 forget component, `retain_loss_curve.png`는 retain component를
+각각 표시한다. 두 파일 모두 좌측에는 forget/retain 전체 task loss를 함께 둔다.
+Baseline을 split 없이 실행한 경우에만 두 curve가 없다. `summary.json`은
+공통적으로 method, objective, completed epochs, optimizer steps,
+checkpoint/history 경로, config, 초기/최종 forget·retain metrics를 기록한다.

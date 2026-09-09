@@ -66,11 +66,11 @@ def _run_configuration(run_dir: Path, run_name: str, experiment_root: Path) -> d
     if summary_path.is_file():
         with summary_path.open(encoding="utf-8") as handle:
             summary = json.load(handle)
-        config = summary.get("unlearning_config", {})
-        required = {"step_mode", "epochs", "lr", "center_weight", "unlearn_seed"}
+        config = summary.get("config") or summary.get("unlearning_config", {})
+        required = {"epochs", "lr", "center_weight", "unlearn_seed"}
         if required <= set(config):
             return {
-                "step_mode": str(config["step_mode"]),
+                "step_mode": str(config.get("step_mode", summary.get("method", "neggrad"))),
                 "train_epochs": int(config["epochs"]),
                 "learning_rate": float(config["lr"]),
                 "train_center_weight": float(config["center_weight"]),
@@ -141,9 +141,9 @@ def _find_runs(experiment_label: str, experiment_root: Path, unit: str) -> tuple
         configuration = _run_configuration(run_dir, run_name, experiment_root)
         losses = pd.read_csv(loss_path)
         similarities = pd.read_csv(similarity_path)
-        # ``history.csv`` is the sample-weighted objective used by gradient
-        # ascent.  Its reference lines must therefore also be sample means.
-        # The metrics below may still use ``unit`` (patient by default).
+        # Full-set forget/retain columns in ``history.csv`` are sample means,
+        # so their reference lines must also use sample-level evaluation.
+        # The comparison metrics below may still use ``unit`` (patient by default).
         reference_losses = {
             f"{model}_{assignment}_{loss_name}": _one_value(
                 losses,

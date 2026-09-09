@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 import sys
 from pathlib import Path
 
@@ -23,14 +24,37 @@ from model import (
     SOURCE_AE,
     TARGET_weightencoder,
 )
-from unlearning.loss_history import plot_history, split_metrics_row, write_history
-from unlearning.objective import evaluate_loader
+from unlearning.loss_history import (
+    format_epoch_log,
+    plot_history,
+    plot_retain_history,
+    split_metrics_row,
+    write_history,
+)
+from unlearning.objective import EVALUATION_BATCH_SIZE, evaluate_loader
 from unlearning.split import build_sample_table, load_manifest_indices
 from utils import set_seed
 
 
+def _validate_args(args: argparse.Namespace) -> None:
+    positive = {
+        "epochs": args.epochs,
+        "batch_size": args.batch_size,
+        "lr": args.lr,
+    }
+    invalid = {name: value for name, value in positive.items() if value <= 0}
+    if invalid:
+        raise ValueError(f"arguments must be positive: {invalid}")
+    loss_weights = (args.recon_weight, args.class_weight, args.center_weight)
+    if any(weight < 0 for weight in loss_weights) or not any(loss_weights):
+        raise ValueError(
+            "loss weights must be non-negative and at least one must be positive"
+        )
+
+
 def retrain(args: argparse.Namespace) -> None:
     """Run the original source+target training, replacing TCGA with retain TCGA."""
+    _validate_args(args)
     device = torch.device(args.device)
     data_dir = Path(args.data_dir)
     requested_output = Path(args.output_dir)
@@ -57,7 +81,7 @@ def retrain(args: argparse.Namespace) -> None:
     )
     forget_indices, retain_indices = load_manifest_indices(sample_table, args.split_dir)
 
-    set_seed(args.seed)
+    set_seed(args.seed, logger=lambda _: None)
     num_tissue = int(source_info["tissue_label"].nunique())
     source_dataset = AlignerDataset(source_df, args.source, source_info["tissue_label"])
     target_dataset = AlignerDataset(target_df, args.target, target_info[args.tissue_column])
@@ -70,12 +94,12 @@ def retrain(args: argparse.Namespace) -> None:
     )
     forget_eval_loader = DataLoader(
         Subset(target_dataset, forget_indices),
-        batch_size=args.eval_batch_size,
+        batch_size=EVALUATION_BATCH_SIZE,
         shuffle=False,
     )
     retain_eval_loader = DataLoader(
         Subset(target_dataset, retain_indices),
-        batch_size=args.eval_batch_size,
+        batch_size=EVALUATION_BATCH_SIZE,
         shuffle=False,
     )
 
@@ -123,19 +147,19 @@ def retrain(args: argparse.Namespace) -> None:
             0,
             initial_forget,
             initial_retain,
-            train_total=None,
+            method="retrain",
+            optimizer_steps=0,
+            cumulative_optimizer_steps=0,
             train_source=None,
             train_target_retain=None,
         )
     ]
     print(
-        f"[data] forget_samples(excluded)={len(forget_indices)} "
-        f"retain_samples(training)={len(retain_indices)}"
+        f"[retrain][setup] forget_samples={len(forget_indices)} "
+        f"retain_samples={len(retain_indices)} batch_size={args.batch_size} "
+        f"optimizer_steps_per_epoch={len(retain_loader)} seed={args.seed}"
     )
-    print(
-        f"[epoch 0 before update] target_forget={initial_forget['task']:.6f} "
-        f"target_retain={initial_retain['task']:.6f}"
-    )
+    print(format_epoch_log(history[-1], args.epochs))
     for epoch in range(args.epochs):
         source_ae.train()
         target_encoder.train()
@@ -186,22 +210,23 @@ def retrain(args: argparse.Namespace) -> None:
             epoch + 1,
             forget_metrics,
             retain_metrics,
-            train_total=train_means["total"],
+            method="retrain",
+            optimizer_steps=len(retain_loader),
+            cumulative_optimizer_steps=(epoch + 1) * len(retain_loader),
+            train_objective=train_means["total"],
             train_source=train_means["source"],
             train_target_retain=train_means["target"],
         )
         history.append(row)
-        print(
-            f"[epoch {epoch + 1}/{args.epochs}] "
-            f"target_forget={row['forget_task']:.6f} "
-            f"target_retain={row['retain_task']:.6f} "
-            f"mini_batch_train={row['train_total']:.6f}"
-        )
+        print(format_epoch_log(row, args.epochs))
 
     checkpoint_path = output_dir / f"THERAPI_aligner_{args.source}_{args.target}.pt"
     torch.save(
         {
             "epoch": args.epochs - 1,
+            "method": "retrain",
+            "completed_epochs": args.epochs,
+            "optimizer_steps": history[-1]["cumulative_optimizer_steps"],
             "source_AE": source_ae.state_dict(),
             "target_weightencoder": target_encoder.state_dict(),
             "emb_dis_classifier": emb_classifier.state_dict(),
@@ -223,17 +248,46 @@ def retrain(args: argparse.Namespace) -> None:
         args.loss_scale,
         epoch_label="retraining epoch",
     )
-    print(
-        f"[final post-update target mean] forget={history[-1]['forget_task']:.6f} "
-        f"retain={history[-1]['retain_task']:.6f}"
+    retain_curve_path = output_dir / "retain_loss_curve.png"
+    plot_retain_history(
+        history,
+        retain_curve_path,
+        args.loss_scale,
+        epoch_label="retraining epoch",
     )
-    print(f"[done] retain-only retrained checkpoint -> {checkpoint_path.resolve()}")
-    print(f"[done] history={history_path.resolve()} curve={curve_path.resolve()}")
+    summary = {
+        "method": "retrain",
+        "objective": "minimize_source_loss_plus_retain_target_loss",
+        "objective_coefficients": {"source": 1.0, "forget": 0.0, "retain": 1.0},
+        "sampling": "one_shuffled_retain_pass_per_epoch",
+        "batch_size": args.batch_size,
+        "completed_epochs": args.epochs,
+        "optimizer_steps": history[-1]["cumulative_optimizer_steps"],
+        "forget_samples_seen": 0,
+        "retain_samples_seen": args.epochs * len(retain_indices),
+        "checkpoint": str(checkpoint_path.resolve()),
+        "history": str(history_path.resolve()),
+        "loss_curve": str(curve_path.resolve()),
+        "retain_loss_curve": str(retain_curve_path.resolve()),
+        "split_dir": str(Path(args.split_dir).resolve()),
+        "config": vars(args),
+        "initial_forget": initial_forget,
+        "initial_retain": initial_retain,
+        "final_forget": forget_metrics,
+        "final_retain": retain_metrics,
+    }
+    with (output_dir / "summary.json").open("w", encoding="utf-8") as handle:
+        json.dump(summary, handle, indent=2, sort_keys=True)
+        handle.write("\n")
+    print(
+        f"[retrain][done] checkpoint={checkpoint_path.resolve()} "
+        f"history={history_path.resolve()} curve={curve_path.resolve()}"
+    )
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--data_dir", default="../data/")
+    parser.add_argument("--data-dir", "--data_dir", dest="data_dir", default="../data/")
     parser.add_argument("--source", default="GDSC")
     parser.add_argument("--target", default="TCGA")
     parser.add_argument("--split-dir", required=True)
@@ -244,7 +298,6 @@ if __name__ == "__main__":
     parser.add_argument("--info-id-column", default=None)
     parser.add_argument("--epochs", type=int, default=199)
     parser.add_argument("--batch-size", type=int, default=128)
-    parser.add_argument("--eval-batch-size", type=int, default=256)
     parser.add_argument("--latent-dim", type=int, default=128)
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--recon-weight", type=float, default=0.2)

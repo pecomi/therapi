@@ -6,13 +6,13 @@ import argparse
 import json
 import math
 import sys
+from itertools import cycle
 from pathlib import Path
 
 import pandas as pd
 import torch
 import torch.nn as nn
-from torch.utils.data import DataLoader, RandomSampler, Subset
-from itertools import cycle
+from torch.utils.data import DataLoader, Subset
 
 SRC_DIR = Path(__file__).resolve().parents[1]
 if str(SRC_DIR) not in sys.path:
@@ -26,8 +26,20 @@ from model import (
     SOURCE_AE,
     TARGET_weightencoder,
 )
-from unlearning.loss_history import write_history
-from unlearning.objective import alignment_losses, evaluate_loader, forward_aligner
+from unlearning.loss_history import (
+    format_epoch_log,
+    plot_history,
+    plot_retain_history,
+    split_metrics_row,
+    write_history,
+)
+from unlearning.objective import (
+    EVALUATION_BATCH_SIZE,
+    alignment_losses,
+    evaluate_loader,
+    forward_aligner,
+    neggrad_plus_objective,
+)
 from unlearning.split import build_sample_table, load_manifest_indices
 from utils import set_seed
 
@@ -45,58 +57,34 @@ def _gradient_norm(parameters) -> float:
     ) ** 0.5
 
 
-def _plot_history(history, path: Path, loss_scale: str) -> None:
-    """Plot post-epoch full-set losses, matching gradient_ascent.py."""
-    import matplotlib
-
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
-
-    epochs = [row["epoch"] for row in history]
-    fig, axes = plt.subplots(1, 2, figsize=(12, 4.5))
-    axes[0].plot(epochs, [row["forget_task"] for row in history], label="forget")
-    axes[0].plot(epochs, [row["retain_task"] for row in history], label="retain")
-    axes[0].set(title="Mean alignment loss", xlabel="joint epoch", ylabel="loss")
-    axes[0].legend()
-    for name in ("recon", "emb_class", "exp_class", "center"):
-        axes[1].plot(
-            epochs,
-            [row[f"forget_{name}"] for row in history],
-            label=name,
-        )
-    axes[1].set(
-        title="Forget loss components", xlabel="joint epoch", ylabel="loss"
-    )
-    axes[1].legend()
-    for axis in axes:
-        if loss_scale == "symlog":
-            axis.set_yscale("symlog", linthresh=1e-2)
-        else:
-            axis.set_yscale(loss_scale)
-        axis.grid(alpha=0.25)
-    fig.tight_layout()
-    fig.savefig(path, dpi=180)
-    plt.close(fig)
-
-
 def _save_loss_outputs(history, output_dir: Path, loss_scale: str) -> None:
     """Persist every completed epoch so partial runs still have a curve."""
     write_history(history, output_dir / "history.csv")
-    _plot_history(history, output_dir / "loss_curve.png", loss_scale)
+    plot_history(
+        history,
+        output_dir / "loss_curve.png",
+        loss_scale,
+        epoch_label="NegGrad+ epoch",
+    )
+    plot_retain_history(
+        history,
+        output_dir / "retain_loss_curve.png",
+        loss_scale,
+        epoch_label="NegGrad+ epoch",
+    )
 
 
 def _validate_args(args: argparse.Namespace) -> None:
     positive = {
         "epochs": args.epochs,
         "batch_size": args.batch_size,
-        "eval_batch_size": args.eval_batch_size,
         "lr": args.lr,
     }
     invalid = {name: value for name, value in positive.items() if value <= 0}
     if invalid:
         raise ValueError(f"arguments must be positive: {invalid}")
-    if args.max_grad_norm < 0:
-        raise ValueError("max_grad_norm must be non-negative")
+    if not 0.0 <= args.beta <= 1.0:
+        raise ValueError("beta must be between 0 and 1")
     loss_weights = (args.recon_weight, args.class_weight, args.center_weight)
     if any(weight < 0 for weight in loss_weights) or not any(loss_weights):
         raise ValueError(
@@ -105,7 +93,7 @@ def _validate_args(args: argparse.Namespace) -> None:
 
 
 def joint_unlearn(args: argparse.Namespace) -> None:
-    """Minimize retain loss minus forget loss with equal group weights."""
+    """Run NegGrad+ by minimizing beta-weighted retain and forget losses."""
     _validate_args(args)
     device = torch.device(args.device)
     data_dir = Path(args.data_dir)
@@ -152,7 +140,7 @@ def joint_unlearn(args: argparse.Namespace) -> None:
 
     # Reproduce the legacy center initialization if the checkpoint predates
     # center serialization. All learned modules are then restored exactly.
-    set_seed(args.original_train_seed)
+    set_seed(args.original_train_seed, logger=lambda _: None)
     source_ae = SOURCE_AE(
         source_dataset.n_genes, n_tissue, args.latent_dim
     ).to(device)
@@ -204,11 +192,12 @@ def joint_unlearn(args: argparse.Namespace) -> None:
     )
     models = (source_ae, target_encoder, emb_classifier, exp_classifier)
 
-    set_seed(args.unlearn_seed)
+    set_seed(args.unlearn_seed, logger=lambda _: None)
     forget_dataset = Subset(target_dataset, forget_indices)
     retain_dataset = Subset(target_dataset, retain_indices)
-    # Retain defines an epoch. Draw the same number of forget examples with
-    # replacement so every retain batch has an equally sized forget batch.
+    # Retain defines an epoch. The shuffled forget loader is cycled until every
+    # retain batch is consumed. A new deterministic shuffle is produced when a
+    # new outer epoch constructs a fresh iterator over the loader.
     forget_loader = DataLoader(
         forget_dataset,
         batch_size=args.batch_size,
@@ -225,12 +214,12 @@ def joint_unlearn(args: argparse.Namespace) -> None:
     )
     forget_eval_loader = DataLoader(
         Subset(target_dataset, forget_indices),
-        batch_size=args.eval_batch_size,
+        batch_size=EVALUATION_BATCH_SIZE,
         shuffle=False,
     )
     retain_eval_loader = DataLoader(
         Subset(target_dataset, retain_indices),
-        batch_size=args.eval_batch_size,
+        batch_size=EVALUATION_BATCH_SIZE,
         shuffle=False,
     )
     source_gex = source_dataset.data.to(device)
@@ -248,39 +237,33 @@ def joint_unlearn(args: argparse.Namespace) -> None:
 
     input_forget = evaluate(forget_eval_loader)
     input_retain = evaluate(retain_eval_loader)
+    evaluation_objective = neggrad_plus_objective(
+        input_forget["task"], input_retain["task"], args.beta
+    )
     history = [
-        {
-            "epoch": 0,
-            "optimizer_steps": 0,
-            "cumulative_optimizer_steps": 0,
-            "gradient_norm": None,
-            "joint_objective": input_retain["task"] - input_forget["task"],
-            **{f"forget_{key}": value for key, value in input_forget.items()},
-            **{f"retain_{key}": value for key, value in input_retain.items()},
-        }
+        split_metrics_row(
+            0,
+            input_forget,
+            input_retain,
+            method="neggrad_plus",
+            optimizer_steps=0,
+            cumulative_optimizer_steps=0,
+            evaluation_objective=evaluation_objective,
+        )
     ]
-    effective_batch = min(args.batch_size, len(retain_indices))
     print(
-        f"[data] forget={len(forget_indices)} retain={len(retain_indices)} "
-        f"micro_batch={args.batch_size}"
+        f"[neggrad_plus][setup] forget_samples={len(forget_indices)} "
+        f"retain_samples={len(retain_indices)} batch_size={args.batch_size} "
+        f"optimizer_steps_per_epoch={len(retain_loader)} beta={args.beta:.6f} "
+        f"original_train_seed={args.original_train_seed} "
+        f"unlearn_seed={args.unlearn_seed}"
     )
-    print(
-        f"[batch] optimizer_steps_per_epoch={len(retain_loader)} "
-        f"retain_samples_per_epoch={len(retain_indices)} "
-        f"paired_forget_draws_per_epoch={len(retain_indices)} "
-        f"effective_batch<={effective_batch}"
-    )
-    print(
-        f"[input baseline] forget={input_forget['task']:.6f} "
-        f"retain={input_retain['task']:.6f}"
-    )
+    print(format_epoch_log(history[-1], args.epochs))
     _save_loss_outputs(history, output_dir, args.loss_scale)
-    print(
-        f"[loss] initialized history={output_dir / 'history.csv'} "
-        f"curve={output_dir / 'loss_curve.png'}"
-    )
 
     cumulative_steps = 0
+    cumulative_forget_samples = 0
+    cumulative_retain_samples = 0
     for epoch in range(1, args.epochs + 1):
         source_ae.encoder.train()
         target_encoder.Q.train()
@@ -289,6 +272,9 @@ def joint_unlearn(args: argparse.Namespace) -> None:
         exp_classifier.train()
 
         step_norms = []
+        objective_sum = 0.0
+        forget_samples_seen = 0
+        retain_samples_seen = 0
         for forget_batch, retain_batch in zip(cycle(forget_loader), retain_loader):
             optimizer.zero_grad(set_to_none=True)
             forget_gex, _, forget_labels = forget_batch
@@ -318,7 +304,9 @@ def joint_unlearn(args: argparse.Namespace) -> None:
                 args.class_weight,
                 args.center_weight,
             )
-            objective = args.beta*retain_losses["task"] - (1-args.beta)*forget_losses["task"]
+            objective = neggrad_plus_objective(
+                forget_losses["task"], retain_losses["task"], args.beta
+            )
             if not all(
                 torch.isfinite(value)
                 for value in (
@@ -340,13 +328,16 @@ def joint_unlearn(args: argparse.Namespace) -> None:
                 raise RuntimeError(
                     "non-finite gradient encountered before optimizer step"
                 )
-            if args.max_grad_norm > 0:
-                torch.nn.utils.clip_grad_norm_(trainable, args.max_grad_norm)
             optimizer.step()
             step_norms.append((total_norm, group_norms))
+            objective_sum += objective.item()
+            forget_samples_seen += len(forget_gex)
+            retain_samples_seen += len(retain_gex)
 
         optimizer_steps = len(step_norms)
         cumulative_steps += optimizer_steps
+        cumulative_forget_samples += forget_samples_seen
+        cumulative_retain_samples += retain_samples_seen
         gradient_norm = sum(total for total, _ in step_norms) / optimizer_steps
         mean_group_norms = {
             name: sum(norms[name] for _, norms in step_norms) / optimizer_steps
@@ -354,41 +345,40 @@ def joint_unlearn(args: argparse.Namespace) -> None:
         }
         forget_metrics = evaluate(forget_eval_loader)
         retain_metrics = evaluate(retain_eval_loader)
-        joint_objective = retain_metrics["task"] - forget_metrics["task"]
+        evaluation_objective = neggrad_plus_objective(
+            forget_metrics["task"], retain_metrics["task"], args.beta
+        )
         if not all(
             math.isfinite(value)
             for value in (
                 forget_metrics["task"],
                 retain_metrics["task"],
-                joint_objective,
+                evaluation_objective,
             )
         ):
             raise RuntimeError(f"non-finite evaluated loss at epoch {epoch}")
         history.append(
-            {
-                "epoch": epoch,
-                "optimizer_steps": optimizer_steps,
-                "cumulative_optimizer_steps": cumulative_steps,
-                "gradient_norm": gradient_norm,
-                "joint_objective": joint_objective,
+            split_metrics_row(
+                epoch,
+                forget_metrics,
+                retain_metrics,
+                method="neggrad_plus",
+                optimizer_steps=optimizer_steps,
+                cumulative_optimizer_steps=cumulative_steps,
+                train_objective=objective_sum / optimizer_steps,
+                evaluation_objective=evaluation_objective,
+                gradient_norm=gradient_norm,
                 **{
                     f"grad_{name}": value
                     for name, value in mean_group_norms.items()
                 },
-                **{f"forget_{key}": value for key, value in forget_metrics.items()},
-                **{f"retain_{key}": value for key, value in retain_metrics.items()},
-            }
+            )
         )
         _save_loss_outputs(history, output_dir, args.loss_scale)
-        print(
-            f"[epoch {epoch}/{args.epochs}] "
-            f"forget={forget_metrics['task']:.6f} "
-            f"retain={retain_metrics['task']:.6f} "
-            f"joint={joint_objective:.6f} steps={optimizer_steps}"
-        )
+        print(format_epoch_log(history[-1], args.epochs))
 
-    final_forget = evaluate(forget_eval_loader)
-    final_retain = evaluate(retain_eval_loader)
+    final_forget = forget_metrics
+    final_retain = retain_metrics
     torch.save(
         {
             "epoch": checkpoint.get("epoch"),
@@ -398,43 +388,42 @@ def joint_unlearn(args: argparse.Namespace) -> None:
             "exp_dis_classifier": exp_classifier.state_dict(),
             "center_criterion": center.state_dict(),
             "optimizer": optimizer.state_dict(),
-            "joint_unlearning_epochs": args.epochs,
-            "joint_unlearning_optimizer_steps": cumulative_steps,
-            "baseline_checkpoint": str(input_checkpoint.resolve()),
+            "method": "neggrad_plus",
+            "completed_epochs": args.epochs,
+            "optimizer_steps": cumulative_steps,
+            "original_checkpoint": str(input_checkpoint.resolve()),
             "split_dir": str(Path(args.split_dir).resolve()),
-            "joint_unlearning_config": vars(args),
+            "config": vars(args),
         },
         checkpoint_path,
     )
 
-    _save_loss_outputs(history, output_dir, args.loss_scale)
-
     summary = {
-        "objective": "minimize_equal_weight_retain_loss_minus_forget_loss",
-        "baseline_checkpoint": str(input_checkpoint.resolve()),
+        "method": "neggrad_plus",
+        "objective": "minimize_beta_retain_loss_minus_one_minus_beta_forget_loss",
+        "objective_coefficients": {
+            "forget": -(1.0 - args.beta),
+            "retain": args.beta,
+        },
+        "original_checkpoint": str(input_checkpoint.resolve()),
         "checkpoint": str(checkpoint_path.resolve()),
+        "history": str((output_dir / "history.csv").resolve()),
+        "loss_curve": str((output_dir / "loss_curve.png").resolve()),
+        "retain_loss_curve": str((output_dir / "retain_loss_curve.png").resolve()),
         "split_dir": str(Path(args.split_dir).resolve()),
         "trainable_groups": [name for name, _ in groups],
         "frozen_groups": ["source_decoder", "target_decoder", "center"],
-        "forget_coefficient": -1.0,
-        "retain_coefficient": 1.0,
-        "retain_samples_per_epoch": len(retain_indices),
-        "paired_forget_draws_per_epoch": len(retain_indices),
+        "sampling": "retain_epoch_with_cycled_shuffled_forget_batches",
         "completed_epochs": args.epochs,
-        "micro_batch_size": args.batch_size,
-        "effective_batch_size": effective_batch,
+        "batch_size": args.batch_size,
         "optimizer_steps": cumulative_steps,
-        "loss_curve": str((output_dir / "loss_curve.png").resolve()),
+        "forget_samples_seen": cumulative_forget_samples,
+        "retain_samples_seen": cumulative_retain_samples,
+        "effective_forget_passes": cumulative_forget_samples / len(forget_indices),
         "center_source": center_source,
-        "unlearning_config": {
-            "step_mode": "joint",
-            "epochs": args.epochs,
-            "lr": args.lr,
-            "center_weight": args.center_weight,
-            "unlearn_seed": args.unlearn_seed,
-        },
-        "input_baseline_forget": input_forget,
-        "input_baseline_retain": input_retain,
+        "config": vars(args),
+        "initial_forget": input_forget,
+        "initial_retain": input_retain,
         "final_forget": final_forget,
         "final_retain": final_retain,
     }
@@ -442,13 +431,17 @@ def joint_unlearn(args: argparse.Namespace) -> None:
         json.dump(summary, handle, indent=2, sort_keys=True)
         handle.write("\n")
 
-    print(f"[done] completed_epochs={args.epochs}")
-    print(f"[done] checkpoint={checkpoint_path.resolve()}")
+    print(
+        f"[neggrad_plus][done] completed_epochs={args.epochs} "
+        f"checkpoint={checkpoint_path.resolve()} "
+        f"history={(output_dir / 'history.csv').resolve()} "
+        f"curve={(output_dir / 'loss_curve.png').resolve()}"
+    )
 
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--data_dir", default="../data/")
+    parser.add_argument("--data-dir", "--data_dir", dest="data_dir", default="../data/")
     parser.add_argument("--source", default="GDSC")
     parser.add_argument("--target", default="TCGA")
     parser.add_argument(
@@ -466,12 +459,10 @@ if __name__ == "__main__":
     parser.add_argument("--latent-dim", type=int, default=128)
     parser.add_argument("--epochs", type=int, default=30)
     parser.add_argument("--batch-size", type=int, default=128)
-    parser.add_argument("--eval-batch-size", type=int, default=256)
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--recon-weight", type=float, default=0.2)
     parser.add_argument("--class-weight", type=float, default=0.4)
     parser.add_argument("--center-weight", type=float, default=0.8)
-    parser.add_argument("--max-grad-norm", type=float, default=0.0)
     parser.add_argument(
         "--loss-scale",
         choices=("linear", "log", "symlog"),

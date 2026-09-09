@@ -1,3 +1,4 @@
+import json
 import os
 from pathlib import Path
 
@@ -8,19 +9,41 @@ import torch.nn as nn
 from torch.utils.data import DataLoader, Subset
 
 from model import *
-from unlearning.loss_history import plot_history, split_metrics_row, write_history
-from unlearning.objective import evaluate_loader
+from unlearning.loss_history import (
+    format_epoch_log,
+    plot_history,
+    plot_retain_history,
+    split_metrics_row,
+    write_history,
+)
+from unlearning.objective import EVALUATION_BATCH_SIZE, evaluate_loader
 from unlearning.split import build_sample_table, load_manifest_indices
 from utils import set_seed, Logger
 from center_loss import CenterLoss
 
 
-def train_aligner(args):
+def _validate_args(args):
+    positive = {
+        'epochs': args.epochs,
+        'batch_size': args.batch_size,
+        'lr': args.lr,
+    }
+    invalid = {name: value for name, value in positive.items() if value <= 0}
+    if invalid:
+        raise ValueError(f'arguments must be positive: {invalid}')
+    loss_weights = (args.recon_weight, args.class_weight, args.center_weight)
+    if any(weight < 0 for weight in loss_weights) or not any(loss_weights):
+        raise ValueError(
+            'loss weights must be non-negative and at least one must be positive'
+        )
 
+
+def train_aligner(args):
+    _validate_args(args)
     model_name = f'THERAPI_aligner_{args.source}_{args.target}'
     logger = Logger(model_name)
     logger('Start training {} model'.format(model_name))
-    set_seed(args.seed, logger)
+    set_seed(args.seed, logger=lambda _: None)
 
     # parameters
     batch_size = args.batch_size
@@ -74,6 +97,8 @@ def train_aligner(args):
     # the target loss on fixed, full forget/retain sets before training and after
     # every completed epoch, using the same evaluator as the unlearning scripts.
     history = []
+    initial_forget = initial_retain = None
+    forget_indices = retain_indices = None
     forget_eval_loader = retain_eval_loader = None
     models = (source_AE, target_weightencoder, emb_dis_classifier, exp_dis_classifier)
     source_gex_eval = source_dataset.data.to(args.device)
@@ -87,12 +112,12 @@ def train_aligner(args):
         forget_indices, retain_indices = load_manifest_indices(sample_table, args.split_dir)
         forget_eval_loader = DataLoader(
             Subset(target_unlabeled_dataset, forget_indices),
-            batch_size=args.eval_batch_size,
+            batch_size=EVALUATION_BATCH_SIZE,
             shuffle=False,
         )
         retain_eval_loader = DataLoader(
             Subset(target_unlabeled_dataset, retain_indices),
-            batch_size=args.eval_batch_size,
+            batch_size=EVALUATION_BATCH_SIZE,
             shuffle=False,
         )
 
@@ -109,11 +134,22 @@ def train_aligner(args):
 
         initial_forget = evaluate(forget_eval_loader)
         initial_retain = evaluate(retain_eval_loader)
-        history.append(split_metrics_row(0, initial_forget, initial_retain))
-        logger(
-            f'Epoch 0 (before update), target forget {initial_forget["task"]:.6f}, '
-            f'target retain {initial_retain["task"]:.6f}'
+    history.append(
+        split_metrics_row(
+            0,
+            initial_forget,
+            initial_retain,
+            method="baseline",
+            optimizer_steps=0,
+            cumulative_optimizer_steps=0,
         )
+    )
+    logger(
+        f'[baseline][setup] target_samples={len(target_unlabeled_dataset)} '
+        f'batch_size={args.batch_size} '
+        f'optimizer_steps_per_epoch={len(target_unlabeled_dataloader)} seed={args.seed}'
+    )
+    logger(format_epoch_log(history[-1], args.epochs))
 
     # training
     for epoch in range(args.epochs):
@@ -167,46 +203,91 @@ def train_aligner(args):
         train_losses /= len(target_unlabeled_dataloader)
         g_losses /= len(target_unlabeled_dataloader)
         t_losses /= len(target_unlabeled_dataloader)
-        message = (
-            f'Epoch {epoch+1}, mini-batch train mean {train_losses:.4f}, '
-            f'G_losses {g_losses:.4f}, T_losses {t_losses:.4f}'
-        )
+        forget_metrics = retain_metrics = None
         if forget_eval_loader is not None:
             forget_metrics = evaluate(forget_eval_loader)
             retain_metrics = evaluate(retain_eval_loader)
-            history.append(
-                split_metrics_row(epoch + 1, forget_metrics, retain_metrics)
+        history.append(
+            split_metrics_row(
+                epoch + 1,
+                forget_metrics,
+                retain_metrics,
+                method="baseline",
+                optimizer_steps=len(target_unlabeled_dataloader),
+                cumulative_optimizer_steps=(epoch + 1) * len(target_unlabeled_dataloader),
+                train_objective=train_losses,
+                train_source=g_losses,
+                train_target=t_losses,
             )
-            message += (
-                f', post-update target forget {forget_metrics["task"]:.6f}, '
-                f'target retain {retain_metrics["task"]:.6f}'
-            )
-        logger(message)
+        )
+        logger(format_epoch_log(history[-1], args.epochs))
 
     # save model
+    checkpoint_path = Path(f'ckpts/{model_name}.pt')
     torch.save({'epoch': epoch,
+                'method': 'baseline',
+                'completed_epochs': args.epochs,
+                'optimizer_steps': history[-1]['cumulative_optimizer_steps'],
                 'source_AE': source_AE.state_dict(),
                 'target_weightencoder': target_weightencoder.state_dict(),
                 'emb_dis_classifier': emb_dis_classifier.state_dict(),
                 'exp_dis_classifier': exp_dis_classifier.state_dict(),
                 'center_criterion': center_criterion.state_dict(),
-                'optimizer': optimizer.state_dict()
-                }, f'ckpts/{model_name}.pt')
-    if history:
-        history_path = Path('ckpts/history.csv')
-        curve_path = Path('ckpts/loss_curve.png')
-        write_history(history, history_path)
+                'optimizer': optimizer.state_dict(),
+                'config': vars(args),
+                }, checkpoint_path)
+    history_path = Path('ckpts/history.csv')
+    curve_path = Path('ckpts/loss_curve.png')
+    write_history(history, history_path)
+    if initial_forget is not None:
         plot_history(
             history,
             curve_path,
             args.loss_scale,
             epoch_label='baseline training epoch',
         )
-        logger(
-            f'Final post-update target mean: forget={history[-1]["forget_task"]:.6f}, '
-            f'retain={history[-1]["retain_task"]:.6f}; '
-            f'history={history_path}, curve={curve_path}'
+        retain_curve_path = Path('ckpts/retain_loss_curve.png')
+        plot_retain_history(
+            history,
+            retain_curve_path,
+            args.loss_scale,
+            epoch_label='baseline training epoch',
         )
+    else:
+        retain_curve_path = None
+    summary = {
+        "method": "baseline",
+        "objective": "minimize_source_loss_plus_target_loss",
+        "objective_coefficients": {"source": 1.0, "target": 1.0},
+        "sampling": "one_shuffled_full_target_pass_per_epoch",
+        "batch_size": args.batch_size,
+        "completed_epochs": args.epochs,
+        "optimizer_steps": history[-1]["cumulative_optimizer_steps"],
+        "forget_samples_seen": (
+            args.epochs * len(forget_indices) if forget_indices is not None else None
+        ),
+        "retain_samples_seen": (
+            args.epochs * len(retain_indices) if retain_indices is not None else None
+        ),
+        "checkpoint": str(checkpoint_path.resolve()),
+        "history": str(history_path.resolve()),
+        "loss_curve": str(curve_path.resolve()) if initial_forget is not None else None,
+        "retain_loss_curve": (
+            str(retain_curve_path.resolve()) if retain_curve_path is not None else None
+        ),
+        "split_dir": (
+            str(Path(args.split_dir).resolve()) if args.split_dir is not None else None
+        ),
+        "config": vars(args),
+        "initial_forget": initial_forget,
+        "initial_retain": initial_retain,
+        "final_forget": forget_metrics,
+        "final_retain": retain_metrics,
+    }
+    with Path('ckpts/summary.json').open('w', encoding='utf-8') as handle:
+        json.dump(summary, handle, indent=2, sort_keys=True)
+        handle.write('\n')
+    logger(f'[done] checkpoint={checkpoint_path.resolve()} history={history_path.resolve()}')
    
     
 if __name__ == '__main__':
@@ -214,7 +295,7 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--seed', type=int, default=0)
     parser.add_argument('--device', type=str, default='cuda:1')
-    parser.add_argument('--data_dir', type=str, default='../data/')
+    parser.add_argument('--data-dir', '--data_dir', dest='data_dir', default='../data/')
     parser.add_argument('--source', type=str, default='GDSC')
     parser.add_argument('--target', type=str, default='TCGA')
     parser.add_argument('--split-dir', default=None)
@@ -222,7 +303,6 @@ if __name__ == '__main__':
     parser.add_argument('--info-id-column', default=None)
     parser.add_argument('--epochs', type=int, default=199)
     parser.add_argument('--batch-size', type=int, default=128)
-    parser.add_argument('--eval-batch-size', type=int, default=256)
     parser.add_argument('--latent-dim', type=int, default=128)
     parser.add_argument('--lr', type=float, default=1e-3)
     parser.add_argument('--recon-weight', type=float, default=0.2)

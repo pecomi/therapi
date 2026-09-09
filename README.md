@@ -116,15 +116,14 @@ THERAPI/visualizations/
 ## Patient-level TCGA unlearning
 
 The unlearning utilities operate on the TCGA samples used to train the aligner
-(`TCGA_unlabeled_gex.csv`).  A split is made at the participant level, so every
-sample whose barcode starts with the same `TCGA-TSS-PARTICIPANT` prefix receives
-the same assignment.
+(`TCGA_unlabeled_gex.csv`). Splits are made at the participant level, so every
+sample from the same patient receives the same assignment.
 
 Create a tissue-stratified 5% forget split:
 
 ```bash
 python src/unlearning/make_forget_split.py \
-  --data_dir data \
+  --data-dir data \
   --forget-ratio 0.05 \
   --split-seed 0 \
   --output-dir splits/random_patient_5pct_seed0
@@ -134,56 +133,66 @@ This writes patient and sample manifests plus a metadata file under the output
 directory.  Reuse the same manifest for unlearning and deletion-retraining; do
 not resample patients inside a training script.
 
-Run forget-only gradient ascent from an original aligner checkpoint:
+Two unlearning methods are implemented:
+
+- `gradient_ascent.py`: NegGrad, minimizing `-L_forget`.
+- `retain_finetune.py`: NegGrad+, minimizing
+  `beta * L_retain - (1 - beta) * L_forget`.
+
+Run NegGrad from an original aligner checkpoint:
 
 ```bash
 python src/unlearning/gradient_ascent.py \
-  --data_dir data \
+  --data-dir data \
   --checkpoint run/baseline_seed0/ckpts/THERAPI_aligner_GDSC_TCGA.pt \
   --split-dir splits/random_patient_5pct_seed0 \
   --output-dir run/unlearn_5pct_seed0 \
   --device cuda:0 \
   --original-train-seed 0 \
   --unlearn-seed 0 \
-  --step-mode full \
+  --batch-size 64 \
   --lr 1e-5 \
-  --epochs 100 \
-  --min-epochs 10 \
-  --patience 5 \
-  --plateau-rtol 1e-3
+  --epochs 30
 ```
 
-`--output-dir`에는 run 디렉터리를 지정한다. 체크포인트와 unlearning 로그는
-자동으로 그 아래의 `ckpts/`에 저장된다. 이미 `.../ckpts`를 지정한 경우에는
-`ckpts`가 중복으로 추가되지 않는다.
+Run NegGrad+ from the same checkpoint and split:
 
-The minimized objective is the negative TCGA forget alignment loss:
-`-(0.2 * reconstruction + 0.4 * classification + 0.8 * center)`.  Every module
-on this target-loss backpropagation route is updated: the GDSC source encoder,
-the target Q/K attention encoder and decoder, and both tissue classifiers. The
-source decoder has no target-loss gradient and stays frozen. Retain data is
-never used for an optimizer update; its metrics are reported for evaluation
-only. `--step-mode full` accumulates the exact forget-set mean and steps once
-per epoch; `--step-mode mini` performs a stochastic ascent step after every
-mini-batch. Epochs repeat until the evaluated full-forget loss reaches a
-sustained relative-change plateau or `--epochs` is reached. `history.csv` and
-`loss_curve.png` record full forget/retain means from epoch 0 onward. Gradient
-clipping is off by default and can be enabled with a positive
-`--max-grad-norm`.
+```bash
+python src/unlearning/retain_finetune.py \
+  --data-dir data \
+  --checkpoint run/baseline_seed0/ckpts/THERAPI_aligner_GDSC_TCGA.pt \
+  --split-dir splits/random_patient_5pct_seed0 \
+  --output-dir run/neggrad_plus_5pct_seed0 \
+  --device cuda:0 \
+  --original-train-seed 0 \
+  --unlearn-seed 0 \
+  --batch-size 128 \
+  --lr 1e-3 \
+  --beta 0.95 \
+  --epochs 30
+```
 
-The original trainer used fixed random center anchors because `CenterLoss`
-parameters were not part of its optimizer.  New original checkpoints save
-those anchors.  For legacy checkpoints, `--original-train-seed` reconstructs
-them using the original initialization order.  Center loss still backpropagates
-through target latent representations, but the center parameters themselves
-are always fixed.
+NegGrad processes one shuffled forget pass per epoch. NegGrad+ uses the retain
+loader as its epoch length and cycles the epoch's shuffled forget batches until
+all retain batches are consumed. Seeded `DataLoader` generators make the
+epoch-to-epoch reshuffling deterministic. Compare runs using optimizer steps
+and forget/retain sample exposure as well as epoch count.
+
+Both methods update the source encoder, target Q/K, and both tissue classifiers.
+The source decoder, target decoder, and center anchors remain fixed under the
+current patient-information removal setting.
+
+For legacy checkpoints without serialized center anchors,
+`--original-train-seed` reconstructs their initialization. Center loss still
+backpropagates through target latent representations, while the anchors remain
+fixed.
 
 For the deletion-retraining reference, train a fresh aligner with GDSC and only
 the retain TCGA rows from the same manifest:
 
 ```bash
 python src/unlearning/retrain.py \
-  --data_dir data \
+  --data-dir data \
   --split-dir splits/random_patient_5pct_seed0 \
   --output-dir run/retrain_retain_5pct_seed0 \
   --device cuda:0 \
@@ -201,9 +210,10 @@ Use separate seeds for separate sources of variation:
 * the original aligner's `--seed` controls model initialization/training.
 * `--unlearn-seed` controls unlearning batch order.
 
-The aligner-level unlearning path is independent of the optional CSG2A
-embedding regeneration and can therefore be evaluated before downstream drug
-response embeddings are rebuilt.
+Every training method writes a common epoch history and `summary.json` under its
+`ckpts/` directory. See [`src/unlearning/README.md`](src/unlearning/README.md)
+for file roles, exact objectives, sampling details, output fields, and the
+optional NegGrad multi-seed runner.
 
 ## Contact
 If you have any questions or concerns, please send an email to [inyoung.sung@snu.ac.kr](inyoung.sung@snu.ac.kr).

@@ -226,7 +226,7 @@ def analyze(args: argparse.Namespace) -> None:
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--data_dir", default="../data/")
+    parser.add_argument("--data-dir", "--data_dir", dest="data_dir", default="../data/")
     parser.add_argument("--source", default="GDSC")
     parser.add_argument("--target", default="TCGA")
     parser.add_argument("--original-checkpoint", required=True)
