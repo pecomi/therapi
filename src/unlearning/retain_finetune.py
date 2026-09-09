@@ -12,6 +12,7 @@ import pandas as pd
 import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader, RandomSampler, Subset
+from itertools import cycle
 
 SRC_DIR = Path(__file__).resolve().parents[1]
 if str(SRC_DIR) not in sys.path:
@@ -208,17 +209,12 @@ def joint_unlearn(args: argparse.Namespace) -> None:
     retain_dataset = Subset(target_dataset, retain_indices)
     # Retain defines an epoch. Draw the same number of forget examples with
     # replacement so every retain batch has an equally sized forget batch.
-    forget_sampler = RandomSampler(
-        forget_dataset,
-        replacement=True,
-        num_samples=len(retain_indices),
-        generator=torch.Generator().manual_seed(args.unlearn_seed),
-    )
     forget_loader = DataLoader(
         forget_dataset,
         batch_size=args.batch_size,
-        sampler=forget_sampler,
+        shuffle=True,
         drop_last=False,
+        generator=torch.Generator().manual_seed(args.unlearn_seed),
     )
     retain_loader = DataLoader(
         retain_dataset,
@@ -293,12 +289,10 @@ def joint_unlearn(args: argparse.Namespace) -> None:
         exp_classifier.train()
 
         step_norms = []
-        for forget_batch, retain_batch in zip(forget_loader, retain_loader):
+        for forget_batch, retain_batch in zip(cycle(forget_loader), retain_loader):
             optimizer.zero_grad(set_to_none=True)
             forget_gex, _, forget_labels = forget_batch
             retain_gex, _, retain_labels = retain_batch
-            if len(forget_gex) != len(retain_gex):
-                raise RuntimeError("paired forget/retain batch sizes do not match")
             forget_gex = forget_gex.to(device)
             forget_labels = forget_labels.to(device)
             retain_gex = retain_gex.to(device)
@@ -324,7 +318,7 @@ def joint_unlearn(args: argparse.Namespace) -> None:
                 args.class_weight,
                 args.center_weight,
             )
-            objective = retain_losses["task"] - forget_losses["task"]
+            objective = args.beta*retain_losses["task"] - (1-args.beta)*forget_losses["task"]
             if not all(
                 torch.isfinite(value)
                 for value in (
@@ -484,4 +478,5 @@ if __name__ == "__main__":
         default="log",
         help="y-axis scale for the saved full-set loss curve",
     )
+    parser.add_argument("--beta", type=float, default=0.95)
     joint_unlearn(parser.parse_args())
