@@ -290,11 +290,32 @@ NegGrad+, retraining, representation evaluation에서만 동일한 파일을 재
 | `embed` | `DEPLOY_METHODS`별 TCGA CSG2A embedding 재생성 | 최종 checkpoint 선택 후 |
 | `predictor_test` | 기존 predictor checkpoint로 TCGA 추론 | 최종 predictor 결과 산출 시 |
 
-기본값은 `split baseline neggrad_plus retrain evaluate`다. 즉 새 `RUN_NAME`으로
-실행하면 새 baseline seed부터 결과를 만든다. 출력은
-`run/<RUN_NAME>/baseline`, `neggrad_plus`, `retrain`, `evaluation`에 분리된다.
-같은 `RUN_NAME`이 이미 있으면 기본적으로 `_2` suffix를 붙인다. `RESUME=1`은
-이미 생성한 run에 `embed`나 `predictor_test`처럼 뒤 단계만 추가할 때만 사용한다.
+기본값은 `split baseline neggrad_plus retrain evaluate`다. `RUN_NAME`을 생략하면
+`unlearning_neggradplus_splitseed<SPLIT_SEED>`가 된다. 한 run은 하나의 patient
+split을 소유하고, baseline과 retrain은 그 아래에 한 번만 저장한다. Unlearning
+seed별 결과는 `neggrad_plus_seed<UNLEARN_SEED>`와
+`evaluation_seed<UNLEARN_SEED>`로 분리된다.
+
+```text
+run/unlearning_neggradplus_splitseed0/
+├─ baseline/
+├─ retrain/
+├─ neggrad_plus_seed0/
+├─ evaluation_seed0/
+├─ neggrad_plus_seed1/
+└─ evaluation_seed1/
+```
+
+같은 `RUN_NAME`이 이미 있으면 기본적으로 `_2` suffix를 붙인다. 같은 split에
+새 unlearning seed를 추가할 때는 `RESUME=1`을 사용한다. 이 경우 baseline/retrain
+stage를 넣지 않으면 기존 checkpoint를 재사용한다.
+
+```bash
+RUN_NAME=unlearning_neggradplus_splitseed0 RESUME=1 \
+STAGES="neggrad_plus evaluate embed predictor_test" \
+UNLEARN_SEED=1 DEPLOY_METHODS="neggrad_plus" \
+./unlearning_pipeline.sh
+```
 
 hyperparameter 후보 탐색에서는 baseline과 split을 고정하고 `neggrad_plus`만
 실행한다. 다음 예시는 beta와 learning rate만 바꾼 후보 하나를 만든다.

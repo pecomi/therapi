@@ -33,7 +33,9 @@ UNLEARN_SEED=${UNLEARN_SEED:-0}
 SPLIT_SEED=${SPLIT_SEED:-0}
 FORGET_RATIO=${FORGET_RATIO:-0.05}
 
-RUN_NAME=${RUN_NAME:-unlearning_neggradplus_seed${UNLEARN_SEED}}
+# A run owns one patient split.  Repeated unlearning seeds live beneath that
+# run, sharing its baseline and deletion-retraining reference.
+RUN_NAME=${RUN_NAME:-unlearning_neggradplus_splitseed${SPLIT_SEED}}
 SPLIT_DIR=${SPLIT_DIR:-$ROOT/splits/random_patient_5pct_seed${SPLIT_SEED}}
 BASELINE_CHECKPOINT=${BASELINE_CHECKPOINT:-}
 RETRAIN_CHECKPOINT=${RETRAIN_CHECKPOINT:-}
@@ -125,6 +127,9 @@ has_stage() {
 
 run_baseline_checkpoint=$RUN_DIR/baseline/ckpts/THERAPI_aligner_${SOURCE}_${TARGET}.pt
 run_retrain_checkpoint=$RUN_DIR/retrain/ckpts/THERAPI_aligner_${SOURCE}_${TARGET}.pt
+neggrad_dir=$RUN_DIR/neggrad_seed${UNLEARN_SEED}
+neggrad_plus_dir=$RUN_DIR/neggrad_plus_seed${UNLEARN_SEED}
+evaluation_dir=$RUN_DIR/evaluation_seed${UNLEARN_SEED}
 if has_stage baseline || { [ -z "$BASELINE_CHECKPOINT" ] && [ -f "$run_baseline_checkpoint" ]; }; then
     BASELINE_CHECKPOINT=$run_baseline_checkpoint
 fi
@@ -144,9 +149,19 @@ require_split() {
 checkpoint_for() {
     case "$1" in
         baseline) printf '%s\n' "$BASELINE_CHECKPOINT" ;;
-        neggrad) printf '%s\n' "$RUN_DIR/neggrad/ckpts/THERAPI_aligner_${SOURCE}_${TARGET}.pt" ;;
-        neggrad_plus) printf '%s\n' "$RUN_DIR/neggrad_plus/ckpts/THERAPI_aligner_${SOURCE}_${TARGET}.pt" ;;
+        neggrad) printf '%s\n' "$neggrad_dir/ckpts/THERAPI_aligner_${SOURCE}_${TARGET}.pt" ;;
+        neggrad_plus) printf '%s\n' "$neggrad_plus_dir/ckpts/THERAPI_aligner_${SOURCE}_${TARGET}.pt" ;;
         retrain) printf '%s\n' "$RETRAIN_CHECKPOINT" ;;
+        *) echo "unknown deployment method: $1" >&2; exit 1 ;;
+    esac
+}
+
+method_dir_for() {
+    case "$1" in
+        baseline) printf '%s\n' "$RUN_DIR/baseline" ;;
+        neggrad) printf '%s\n' "$neggrad_dir" ;;
+        neggrad_plus) printf '%s\n' "$neggrad_plus_dir" ;;
+        retrain) printf '%s\n' "$RUN_DIR/retrain" ;;
         *) echo "unknown deployment method: $1" >&2; exit 1 ;;
     esac
 }
@@ -172,8 +187,9 @@ create_data_view() {
 
 embed_target() {
     local method=$1
-    local method_dir=$RUN_DIR/$method
+    local method_dir
     local checkpoint out_pert out_comp
+    method_dir=$(method_dir_for "$method")
     checkpoint=$(checkpoint_for "$method")
     require_file "$checkpoint"
     create_data_view "$method_dir"
@@ -229,7 +245,8 @@ link_predictor_checkpoints() {
 
 test_predictor() {
     local method=$1
-    local method_dir=$RUN_DIR/$method
+    local method_dir
+    method_dir=$(method_dir_for "$method")
     create_data_view "$method_dir"
     require_file "$method_dir/data/$TARGET/${TARGET}_perturbation_float16.npy"
     require_file "$method_dir/data/$TARGET/${TARGET}_perturbation_compound_float16.npy"
@@ -313,7 +330,7 @@ if has_stage neggrad; then
         --source "$SOURCE" --target "$TARGET" \
         --checkpoint "$BASELINE_CHECKPOINT" \
         --split-dir "$SPLIT_DIR" \
-        --output-dir "$RUN_DIR/neggrad" \
+        --output-dir "$neggrad_dir" \
         --device "$DEVICE" \
         --original-train-seed "$ORIGINAL_TRAIN_SEED" \
         --unlearn-seed "$UNLEARN_SEED" \
@@ -333,7 +350,7 @@ if has_stage neggrad_plus; then
         --source "$SOURCE" --target "$TARGET" \
         --checkpoint "$BASELINE_CHECKPOINT" \
         --split-dir "$SPLIT_DIR" \
-        --output-dir "$RUN_DIR/neggrad_plus" \
+        --output-dir "$neggrad_plus_dir" \
         --device "$DEVICE" \
         --original-train-seed "$ORIGINAL_TRAIN_SEED" \
         --unlearn-seed "$UNLEARN_SEED" \
@@ -377,7 +394,7 @@ if has_stage evaluate; then
         --unlearned-checkpoint "$unlearned_checkpoint" \
         --retrained-checkpoint "$retrained_checkpoint" \
         --split-dir "$SPLIT_DIR" \
-        --output-dir "$RUN_DIR/evaluation" \
+        --output-dir "$evaluation_dir" \
         --device "$DEVICE" \
         --latent-dim "$LATENT_DIM" \
         --recon-weight "$RECON_WEIGHT" \
