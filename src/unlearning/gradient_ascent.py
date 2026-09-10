@@ -184,17 +184,12 @@ def unlearn(args: argparse.Namespace) -> None:
             0,
             baseline_forget,
             baseline_retain,
-            method="neggrad",
-            optimizer_steps=0,
-            cumulative_optimizer_steps=0,
             evaluation_objective=neggrad_objective(baseline_forget["task"]),
         )
     ]
-    steps_per_epoch = len(forget_loader)
     print(
-        f"[neggrad][setup] forget_samples={len(forget_indices)} "
+        f"[setup] forget_samples={len(forget_indices)} "
         f"retain_samples={len(retain_indices)} batch_size={args.batch_size} "
-        f"optimizer_steps_per_epoch={steps_per_epoch} "
         f"original_train_seed={args.original_train_seed} "
         f"unlearn_seed={args.unlearn_seed}"
     )
@@ -219,7 +214,6 @@ def unlearn(args: argparse.Namespace) -> None:
         source_ae.decoder.eval()
         center.eval()
         step_norms = []
-        objective_sum = 0.0
         for target_gex, _, labels in forget_loader:
             optimizer.zero_grad(set_to_none=True)
             target_gex, labels = target_gex.to(device), labels.to(device)
@@ -238,7 +232,6 @@ def unlearn(args: argparse.Namespace) -> None:
                 raise RuntimeError(f"non-finite ascent objective at epoch {epoch}")
             objective.backward()
             step_norms.append(optimizer_update())
-            objective_sum += objective.item()
 
         optimizer_steps = len(step_norms)
         cumulative_steps += optimizer_steps
@@ -257,10 +250,6 @@ def unlearn(args: argparse.Namespace) -> None:
                 epoch,
                 forget_metrics,
                 retain_metrics,
-                method="neggrad",
-                optimizer_steps=optimizer_steps,
-                cumulative_optimizer_steps=cumulative_steps,
-                train_objective=objective_sum / optimizer_steps,
                 evaluation_objective=neggrad_objective(current_loss),
                 gradient_norm=gradient_norm,
                 **{f"grad_{name}": value for name, value in group_norms.items()},
@@ -318,7 +307,7 @@ def unlearn(args: argparse.Namespace) -> None:
         json.dump(summary, handle, indent=2, sort_keys=True)
         handle.write("\n")
     print(
-        f"[neggrad][done] completed_epochs={args.epochs} "
+        f"[done] completed_epochs={args.epochs} "
         f"checkpoint={checkpoint_path.resolve()} "
         f"history={(output_dir / 'history.csv').resolve()} "
         f"curve={(output_dir / 'loss_curve.png').resolve()}"

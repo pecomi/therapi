@@ -8,10 +8,7 @@ from pathlib import Path
 
 
 _CORE_HISTORY_FIELDS = (
-    "method",
     "epoch",
-    "optimizer_steps",
-    "cumulative_optimizer_steps",
     "train_objective",
     "evaluation_objective",
     "gradient_norm",
@@ -33,9 +30,6 @@ def split_metrics_row(
     forget: dict | None,
     retain: dict | None,
     *,
-    method: str,
-    optimizer_steps: int,
-    cumulative_optimizer_steps: int,
     train_objective: float | None = None,
     evaluation_objective: float | None = None,
     gradient_norm: float | None = None,
@@ -48,27 +42,26 @@ def split_metrics_row(
     objective recomputed from sample means over the complete, fixed
     forget/retain sets. Fields that do not apply to a method are left empty.
     """
-    return {
-        "method": method,
+    row = {
         "epoch": epoch,
-        "optimizer_steps": optimizer_steps,
-        "cumulative_optimizer_steps": cumulative_optimizer_steps,
-        "train_objective": train_objective,
-        "evaluation_objective": evaluation_objective,
-        "gradient_norm": gradient_norm,
         **extra,
         **({f"forget_{name}": value for name, value in forget.items()} if forget else {}),
         **({f"retain_{name}": value for name, value in retain.items()} if retain else {}),
     }
+    for name, value in (
+        ("train_objective", train_objective),
+        ("evaluation_objective", evaluation_objective),
+        ("gradient_norm", gradient_norm),
+    ):
+        if value is not None:
+            row[name] = value
+    return row
 
 
 def format_epoch_log(row: dict, total_epochs: int) -> str:
     """Return one compact, method-independent console log line."""
     parts = [
-        f"[{row['method']}]",
         f"[epoch {int(row['epoch']):03d}/{total_epochs:03d}]",
-        f"steps={int(row['optimizer_steps'])}",
-        f"cumulative_steps={int(row['cumulative_optimizer_steps'])}",
     ]
     for key in (
         "train_objective",

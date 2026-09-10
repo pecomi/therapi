@@ -116,8 +116,6 @@ L_NegGrad+ = beta * L_retain - (1 - beta) * L_forget
 
 `beta`는 0 이상 1 이하이고 기본값은 `0.95`다. `history.csv`의
 `evaluation_objective`에는 전체-set mean으로 재계산한 위 목적함수가 기록된다.
-`train_objective`는 각 step에서 `backward()`에 전달한 scalar의 epoch 평균인
-보조 진단값이며, 실험 결과의 선택·비교에는 `evaluation_objective`를 사용한다.
 
 ### Sampling과 재현성
 
@@ -170,11 +168,8 @@ Baseline checkpoint에서 fine-tune하지 않는다. 무작위 초기화부터 �
 
 | 필드 | 의미 |
 | --- | --- |
-| `method` | `baseline`, `retrain`, `neggrad`, `neggrad_plus` |
 | `epoch` | 0은 update 전 상태, 1 이상은 완료된 epoch |
-| `optimizer_steps` | 해당 epoch의 update 수 |
-| `cumulative_optimizer_steps` | 누적 update 수 |
-| `train_objective` | optimizer 과정 확인용 batch objective 평균 |
+| `train_objective` | baseline/retrain의 mini-batch training loss 평균 |
 | `evaluation_objective` | 결과 비교에 쓰는 full-set mean 방법별 목적함수 |
 | `forget_*`, `retain_*` | 고정 split에서 계산한 full-set target metrics |
 | `gradient_norm` | optimizer update 전 step gradient norm의 epoch 평균 |

@@ -147,17 +147,14 @@ def retrain(args: argparse.Namespace) -> None:
             0,
             initial_forget,
             initial_retain,
-            method="retrain",
-            optimizer_steps=0,
-            cumulative_optimizer_steps=0,
             train_source=None,
             train_target_retain=None,
         )
     ]
     print(
-        f"[retrain][setup] forget_samples={len(forget_indices)} "
+        f"[setup] forget_samples={len(forget_indices)} "
         f"retain_samples={len(retain_indices)} batch_size={args.batch_size} "
-        f"optimizer_steps_per_epoch={len(retain_loader)} seed={args.seed}"
+        f"seed={args.seed}"
     )
     print(format_epoch_log(history[-1], args.epochs))
     for epoch in range(args.epochs):
@@ -210,9 +207,6 @@ def retrain(args: argparse.Namespace) -> None:
             epoch + 1,
             forget_metrics,
             retain_metrics,
-            method="retrain",
-            optimizer_steps=len(retain_loader),
-            cumulative_optimizer_steps=(epoch + 1) * len(retain_loader),
             train_objective=train_means["total"],
             train_source=train_means["source"],
             train_target_retain=train_means["target"],
@@ -226,7 +220,7 @@ def retrain(args: argparse.Namespace) -> None:
             "epoch": args.epochs - 1,
             "method": "retrain",
             "completed_epochs": args.epochs,
-            "optimizer_steps": history[-1]["cumulative_optimizer_steps"],
+            "optimizer_steps": args.epochs * len(retain_loader),
             "source_AE": source_ae.state_dict(),
             "target_weightencoder": target_encoder.state_dict(),
             "emb_dis_classifier": emb_classifier.state_dict(),
@@ -262,7 +256,7 @@ def retrain(args: argparse.Namespace) -> None:
         "sampling": "one_shuffled_retain_pass_per_epoch",
         "batch_size": args.batch_size,
         "completed_epochs": args.epochs,
-        "optimizer_steps": history[-1]["cumulative_optimizer_steps"],
+        "optimizer_steps": args.epochs * len(retain_loader),
         "forget_samples_seen": 0,
         "retain_samples_seen": args.epochs * len(retain_indices),
         "checkpoint": str(checkpoint_path.resolve()),
@@ -280,7 +274,7 @@ def retrain(args: argparse.Namespace) -> None:
         json.dump(summary, handle, indent=2, sort_keys=True)
         handle.write("\n")
     print(
-        f"[retrain][done] checkpoint={checkpoint_path.resolve()} "
+        f"[done] checkpoint={checkpoint_path.resolve()} "
         f"history={history_path.resolve()} curve={curve_path.resolve()}"
     )
 

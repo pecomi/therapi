@@ -139,15 +139,12 @@ def train_aligner(args):
             0,
             initial_forget,
             initial_retain,
-            method="baseline",
-            optimizer_steps=0,
-            cumulative_optimizer_steps=0,
         )
     )
     logger(
-        f'[baseline][setup] target_samples={len(target_unlabeled_dataset)} '
+        f'[setup] target_samples={len(target_unlabeled_dataset)} '
         f'batch_size={args.batch_size} '
-        f'optimizer_steps_per_epoch={len(target_unlabeled_dataloader)} seed={args.seed}'
+        f'seed={args.seed}'
     )
     logger(format_epoch_log(history[-1], args.epochs))
 
@@ -212,9 +209,6 @@ def train_aligner(args):
                 epoch + 1,
                 forget_metrics,
                 retain_metrics,
-                method="baseline",
-                optimizer_steps=len(target_unlabeled_dataloader),
-                cumulative_optimizer_steps=(epoch + 1) * len(target_unlabeled_dataloader),
                 train_objective=train_losses,
                 train_source=g_losses,
                 train_target=t_losses,
@@ -227,7 +221,7 @@ def train_aligner(args):
     torch.save({'epoch': epoch,
                 'method': 'baseline',
                 'completed_epochs': args.epochs,
-                'optimizer_steps': history[-1]['cumulative_optimizer_steps'],
+                'optimizer_steps': args.epochs * len(target_unlabeled_dataloader),
                 'source_AE': source_AE.state_dict(),
                 'target_weightencoder': target_weightencoder.state_dict(),
                 'emb_dis_classifier': emb_dis_classifier.state_dict(),
@@ -262,7 +256,7 @@ def train_aligner(args):
         "sampling": "one_shuffled_full_target_pass_per_epoch",
         "batch_size": args.batch_size,
         "completed_epochs": args.epochs,
-        "optimizer_steps": history[-1]["cumulative_optimizer_steps"],
+        "optimizer_steps": args.epochs * len(target_unlabeled_dataloader),
         "forget_samples_seen": (
             args.epochs * len(forget_indices) if forget_indices is not None else None
         ),

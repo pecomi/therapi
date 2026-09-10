@@ -245,16 +245,13 @@ def joint_unlearn(args: argparse.Namespace) -> None:
             0,
             input_forget,
             input_retain,
-            method="neggrad_plus",
-            optimizer_steps=0,
-            cumulative_optimizer_steps=0,
             evaluation_objective=evaluation_objective,
         )
     ]
     print(
-        f"[neggrad_plus][setup] forget_samples={len(forget_indices)} "
+        f"[setup] forget_samples={len(forget_indices)} "
         f"retain_samples={len(retain_indices)} batch_size={args.batch_size} "
-        f"optimizer_steps_per_epoch={len(retain_loader)} beta={args.beta:.6f} "
+        f"beta={args.beta:.6f} "
         f"original_train_seed={args.original_train_seed} "
         f"unlearn_seed={args.unlearn_seed}"
     )
@@ -272,7 +269,6 @@ def joint_unlearn(args: argparse.Namespace) -> None:
         exp_classifier.train()
 
         step_norms = []
-        objective_sum = 0.0
         forget_samples_seen = 0
         retain_samples_seen = 0
         for forget_batch, retain_batch in zip(cycle(forget_loader), retain_loader):
@@ -330,7 +326,6 @@ def joint_unlearn(args: argparse.Namespace) -> None:
                 )
             optimizer.step()
             step_norms.append((total_norm, group_norms))
-            objective_sum += objective.item()
             forget_samples_seen += len(forget_gex)
             retain_samples_seen += len(retain_gex)
 
@@ -362,10 +357,6 @@ def joint_unlearn(args: argparse.Namespace) -> None:
                 epoch,
                 forget_metrics,
                 retain_metrics,
-                method="neggrad_plus",
-                optimizer_steps=optimizer_steps,
-                cumulative_optimizer_steps=cumulative_steps,
-                train_objective=objective_sum / optimizer_steps,
                 evaluation_objective=evaluation_objective,
                 gradient_norm=gradient_norm,
                 **{
@@ -432,7 +423,7 @@ def joint_unlearn(args: argparse.Namespace) -> None:
         handle.write("\n")
 
     print(
-        f"[neggrad_plus][done] completed_epochs={args.epochs} "
+        f"[done] completed_epochs={args.epochs} "
         f"checkpoint={checkpoint_path.resolve()} "
         f"history={(output_dir / 'history.csv').resolve()} "
         f"curve={(output_dir / 'loss_curve.png').resolve()}"
