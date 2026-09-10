@@ -26,6 +26,7 @@ from model import (
     TARGET_weightencoder,
 )
 from unlearning.loss_history import (
+    RunLogger,
     format_epoch_log,
     plot_history,
     plot_retain_history,
@@ -101,6 +102,7 @@ def unlearn(args: argparse.Namespace) -> None:
             "use a separate run directory"
         )
     output_dir.mkdir(parents=True, exist_ok=True)
+    logger = RunLogger(output_dir / "training.log")
 
     source_df = pd.read_csv(data_dir / args.source / f"{args.source}_gex.csv", index_col=0)
     source_info = pd.read_csv(data_dir / args.source / f"{args.source}_info.csv")
@@ -187,13 +189,13 @@ def unlearn(args: argparse.Namespace) -> None:
             evaluation_objective=neggrad_objective(baseline_forget["task"]),
         )
     ]
-    print(
+    logger(
         f"[setup] forget_samples={len(forget_indices)} "
         f"retain_samples={len(retain_indices)} batch_size={args.batch_size} "
         f"original_train_seed={args.original_train_seed} "
         f"unlearn_seed={args.unlearn_seed}"
     )
-    print(format_epoch_log(history[-1], args.epochs))
+    logger(format_epoch_log(history[-1], args.epochs))
     _save_loss_outputs(history, output_dir, args.loss_scale)
 
     cumulative_steps = 0
@@ -256,7 +258,7 @@ def unlearn(args: argparse.Namespace) -> None:
             )
         )
         _save_loss_outputs(history, output_dir, args.loss_scale)
-        print(format_epoch_log(history[-1], args.epochs))
+        logger(format_epoch_log(history[-1], args.epochs))
 
     final_forget, final_retain = forget_metrics, retain_metrics
     torch.save(
@@ -299,6 +301,7 @@ def unlearn(args: argparse.Namespace) -> None:
         "final_forget": final_forget,
         "final_retain": final_retain,
         "checkpoint": str(checkpoint_path.resolve()),
+        "training_log": str((output_dir / "training.log").resolve()),
         "history": str((output_dir / "history.csv").resolve()),
         "loss_curve": str((output_dir / "loss_curve.png").resolve()),
         "retain_loss_curve": str((output_dir / "retain_loss_curve.png").resolve()),
@@ -306,7 +309,7 @@ def unlearn(args: argparse.Namespace) -> None:
     with (output_dir / "summary.json").open("w", encoding="utf-8") as handle:
         json.dump(summary, handle, indent=2, sort_keys=True)
         handle.write("\n")
-    print(
+    logger(
         f"[done] completed_epochs={args.epochs} "
         f"checkpoint={checkpoint_path.resolve()} "
         f"history={(output_dir / 'history.csv').resolve()} "

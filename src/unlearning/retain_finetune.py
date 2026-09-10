@@ -27,6 +27,7 @@ from model import (
     TARGET_weightencoder,
 )
 from unlearning.loss_history import (
+    RunLogger,
     format_epoch_log,
     plot_history,
     plot_retain_history,
@@ -111,6 +112,7 @@ def joint_unlearn(args: argparse.Namespace) -> None:
             "use a separate run directory"
         )
     output_dir.mkdir(parents=True, exist_ok=True)
+    logger = RunLogger(output_dir / "training.log")
 
     source_df = pd.read_csv(
         data_dir / args.source / f"{args.source}_gex.csv", index_col=0
@@ -280,7 +282,7 @@ def joint_unlearn(args: argparse.Namespace) -> None:
             source_task=input_source["task"],
         )
     ]
-    print(
+    logger(
         f"[setup] forget_samples={len(forget_indices)} "
         f"retain_samples={len(retain_indices)} batch_size={args.batch_size} "
         f"source_samples={len(source_dataset)} "
@@ -288,7 +290,7 @@ def joint_unlearn(args: argparse.Namespace) -> None:
         f"original_train_seed={args.original_train_seed} "
         f"unlearn_seed={args.unlearn_seed}"
     )
-    print(format_epoch_log(history[-1], args.epochs))
+    logger(format_epoch_log(history[-1], args.epochs))
     _save_loss_outputs(history, output_dir, args.loss_scale)
 
     cumulative_steps = 0
@@ -435,7 +437,7 @@ def joint_unlearn(args: argparse.Namespace) -> None:
             )
         )
         _save_loss_outputs(history, output_dir, args.loss_scale)
-        print(format_epoch_log(history[-1], args.epochs))
+        logger(format_epoch_log(history[-1], args.epochs))
 
     final_forget = forget_metrics
     final_retain = retain_metrics
@@ -469,6 +471,7 @@ def joint_unlearn(args: argparse.Namespace) -> None:
         },
         "original_checkpoint": str(input_checkpoint.resolve()),
         "checkpoint": str(checkpoint_path.resolve()),
+        "training_log": str((output_dir / "training.log").resolve()),
         "history": str((output_dir / "history.csv").resolve()),
         "loss_curve": str((output_dir / "loss_curve.png").resolve()),
         "retain_loss_curve": str((output_dir / "retain_loss_curve.png").resolve()),
@@ -496,7 +499,7 @@ def joint_unlearn(args: argparse.Namespace) -> None:
         json.dump(summary, handle, indent=2, sort_keys=True)
         handle.write("\n")
 
-    print(
+    logger(
         f"[done] completed_epochs={args.epochs} "
         f"checkpoint={checkpoint_path.resolve()} "
         f"history={(output_dir / 'history.csv').resolve()} "

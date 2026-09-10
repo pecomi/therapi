@@ -215,10 +215,11 @@ Use separate seeds for separate sources of variation:
 * the original aligner's `--seed` controls model initialization/training.
 * `--unlearn-seed` controls unlearning batch order.
 
-Every training method writes a common epoch history and `summary.json` under its
-`ckpts/` directory. See [`src/unlearning/README.md`](src/unlearning/README.md)
-for file roles, exact objectives, sampling details, output fields, and the
-optional NegGrad multi-seed runner.
+Every training method writes a common epoch history, `summary.json`, and its
+script-generated terminal output as `training.log` under its `ckpts/` directory.
+See [`src/unlearning/README.md`](src/unlearning/README.md) for file roles, exact
+objectives, sampling details, output fields, and the optional NegGrad multi-seed
+runner.
 
 ## Contact
 If you have any questions or concerns, please send an email to [inyoung.sung@snu.ac.kr](inyoung.sung@snu.ac.kr).

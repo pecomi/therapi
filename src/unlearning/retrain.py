@@ -25,6 +25,7 @@ from model import (
     TARGET_weightencoder,
 )
 from unlearning.loss_history import (
+    RunLogger,
     format_epoch_log,
     plot_history,
     plot_retain_history,
@@ -66,6 +67,7 @@ def retrain(args: argparse.Namespace) -> None:
         else requested_output / "ckpts"
     )
     output_dir.mkdir(parents=True, exist_ok=True)
+    logger = RunLogger(output_dir / "training.log")
 
     source_df = pd.read_csv(data_dir / args.source / f"{args.source}_gex.csv", index_col=0)
     source_info = pd.read_csv(data_dir / args.source / f"{args.source}_info.csv")
@@ -151,12 +153,12 @@ def retrain(args: argparse.Namespace) -> None:
             train_target_retain=None,
         )
     ]
-    print(
+    logger(
         f"[setup] forget_samples={len(forget_indices)} "
         f"retain_samples={len(retain_indices)} batch_size={args.batch_size} "
         f"seed={args.seed}"
     )
-    print(format_epoch_log(history[-1], args.epochs))
+    logger(format_epoch_log(history[-1], args.epochs))
     for epoch in range(args.epochs):
         source_ae.train()
         target_encoder.train()
@@ -212,7 +214,7 @@ def retrain(args: argparse.Namespace) -> None:
             train_target_retain=train_means["target"],
         )
         history.append(row)
-        print(format_epoch_log(row, args.epochs))
+        logger(format_epoch_log(row, args.epochs))
 
     checkpoint_path = output_dir / f"THERAPI_aligner_{args.source}_{args.target}.pt"
     torch.save(
@@ -260,6 +262,7 @@ def retrain(args: argparse.Namespace) -> None:
         "forget_samples_seen": 0,
         "retain_samples_seen": args.epochs * len(retain_indices),
         "checkpoint": str(checkpoint_path.resolve()),
+        "training_log": str((output_dir / "training.log").resolve()),
         "history": str(history_path.resolve()),
         "loss_curve": str(curve_path.resolve()),
         "retain_loss_curve": str(retain_curve_path.resolve()),
@@ -273,7 +276,7 @@ def retrain(args: argparse.Namespace) -> None:
     with (output_dir / "summary.json").open("w", encoding="utf-8") as handle:
         json.dump(summary, handle, indent=2, sort_keys=True)
         handle.write("\n")
-    print(
+    logger(
         f"[done] checkpoint={checkpoint_path.resolve()} "
         f"history={history_path.resolve()} curve={curve_path.resolve()}"
     )

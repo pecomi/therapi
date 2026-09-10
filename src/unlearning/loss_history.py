@@ -25,6 +25,21 @@ _PAIRED_METRICS = (
 )
 
 
+class RunLogger:
+    """Mirror a run's script-generated console lines into one plain-text file."""
+
+    def __init__(self, path: Path) -> None:
+        self.path = path
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        # Each invocation is a distinct run, even if it reuses an output directory.
+        self.path.write_text("", encoding="utf-8")
+
+    def __call__(self, message: str) -> None:
+        print(message)
+        with self.path.open("a", encoding="utf-8") as handle:
+            handle.write(f"{message}\n")
+
+
 def split_metrics_row(
     epoch: int,
     forget: dict | None,

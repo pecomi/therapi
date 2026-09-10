@@ -241,6 +241,7 @@ expression을 새 checkpoint로 다시 align하고, 기존 파일을 덮어쓰�
 ```text
 ckpts/
 ├── THERAPI_aligner_GDSC_TCGA.pt
+├── training.log
 ├── history.csv
 ├── loss_curve.png
 ├── retain_loss_curve.png
@@ -251,4 +252,5 @@ ckpts/
 각각 표시한다. 두 파일 모두 좌측에는 forget/retain 전체 task loss를 함께 둔다.
 Baseline을 split 없이 실행한 경우에만 두 curve가 없다. `summary.json`은
 공통적으로 method, objective, completed epochs, optimizer steps,
-checkpoint/history 경로, config, 초기/최종 forget·retain metrics를 기록한다.
+checkpoint/log/history 경로, config, 초기/최종 forget·retain metrics를 기록한다.
+`training.log`에는 해당 실행의 setup, epoch, done 콘솔 행을 원문 그대로 기록한다.
