@@ -214,6 +214,22 @@ GDSC는 환자 split과 무관하므로 전체 cell line을 한 번 평가한다
 `source_representation_similarity.csv`에는 같은 GDSC cell line이 checkpoint
 사이에서 얼마나 바뀌었는지 기록한다.
 
+`retraining_consistency_per_sample.csv`와
+`retraining_consistency_per_patient.csv`는 baseline/retrained 및
+unlearned/retrained의 직접 출력 차이를 각각 sample·patient 단위로 기록한다.
+`retraining_consistency_summary.csv`에는 forget/retain 및 비교쌍별 mean/median을
+정리한다.
+
+- `reconstruction_mse`: target decoder reconstruction의 sample별 MSE
+- `weighted_expression_mse`: attention-weighted GDSC expression의 sample별 MSE
+- `attention_js_divergence`: 같은 673개 GDSC cell line에 대한 attention 분포 차이
+- `task_loss_absolute_difference`: 원래 target task loss의 절대 차이
+
+두 CSV의 비교쌍은 `baseline_vs_retrained`, `unlearned_vs_retrained`다.
+같은 forget/retain group에서 후자의 거리가 전자보다 작으면 unlearned output이
+baseline보다 deletion-retraining output에 가까워진 것으로 해석한다. latent는
+좌표계 재배치 영향을 피하기 위해 기존 CKA/Frechet 결과로 비교한다.
+
 - `linear_cka`, `frechet_latent_distance`: 분포·기하 수준의 비교
 - `mean_paired_cosine_similarity`, `normalized_representation_change`: 동일 cell
   line의 직접적인 paired 변화량

@@ -35,6 +35,16 @@ COMPARISONS = (
     ("baseline", "retrained"),
     ("unlearned", "retrained"),
 )
+RETRAINING_COMPARISONS = (
+    ("baseline", "retrained"),
+    ("unlearned", "retrained"),
+)
+CONSISTENCY_METRICS = (
+    "reconstruction_mse",
+    "weighted_expression_mse",
+    "attention_js_divergence",
+    "task_loss_absolute_difference",
+)
 LEGACY_OUTPUTS = (
     "representation_change_per_sample.csv",
     "representation_change_per_patient.csv",
@@ -126,6 +136,21 @@ def _normalized_representation_change(x: np.ndarray, y: np.ndarray) -> float:
         (np.linalg.norm(x, ord="fro") ** 2 + np.linalg.norm(y, ord="fro") ** 2) / 2
     )
     return float(numerator / denominator) if denominator > 0 else float("nan")
+
+
+def _attention_js_divergence(left: torch.Tensor, right: torch.Tensor) -> torch.Tensor:
+    """Return one Jensen-Shannon divergence for each paired attention row."""
+    epsilon = torch.finfo(left.dtype).eps
+    mixture = (left + right) / 2
+    left_kl = (
+        left
+        * (left.clamp_min(epsilon).log() - mixture.clamp_min(epsilon).log())
+    ).sum(dim=1)
+    right_kl = (
+        right
+        * (right.clamp_min(epsilon).log() - mixture.clamp_min(epsilon).log())
+    ).sum(dim=1)
+    return (left_kl + right_kl) / 2
 
 
 def _patient_means(values: np.ndarray, patient_ids: np.ndarray) -> np.ndarray:
@@ -246,10 +271,16 @@ def evaluate(args: argparse.Namespace) -> None:
         model: {loss: [] for loss in LOSS_NAMES} for model in MODEL_NAMES
     }
     latent_chunks = {model: [] for model in MODEL_NAMES}
+    consistency_chunks = {
+        f"{left}_vs_{right}": {metric: [] for metric in CONSISTENCY_METRICS}
+        for left, right in RETRAINING_COMPARISONS
+    }
 
     for target_gex, _, labels in loader:
         target_gex = target_gex.to(device)
         labels = labels.to(device)
+        batch_outputs = {}
+        batch_losses = {}
         for model_name in MODEL_NAMES:
             _, target_encoder, emb_classifier, exp_classifier, center = models[
                 model_name
@@ -277,6 +308,43 @@ def evaluate(args: argparse.Namespace) -> None:
                     losses[loss_name].detach().cpu().numpy()
                 )
             latent_chunks[model_name].append(latent.detach().cpu().numpy())
+            batch_outputs[model_name] = {
+                "weights": weights,
+                "weighted_gex": weighted_gex,
+                "reconstruction": reconstruction,
+            }
+            batch_losses[model_name] = losses
+
+        for left, right in RETRAINING_COMPARISONS:
+            comparison = f"{left}_vs_{right}"
+            left_output, right_output = batch_outputs[left], batch_outputs[right]
+            consistency_chunks[comparison]["reconstruction_mse"].append(
+                (left_output["reconstruction"] - right_output["reconstruction"])
+                .pow(2)
+                .mean(dim=1)
+                .cpu()
+                .numpy()
+            )
+            consistency_chunks[comparison]["weighted_expression_mse"].append(
+                (left_output["weighted_gex"] - right_output["weighted_gex"])
+                .pow(2)
+                .mean(dim=1)
+                .cpu()
+                .numpy()
+            )
+            consistency_chunks[comparison]["attention_js_divergence"].append(
+                _attention_js_divergence(
+                    left_output["weights"], right_output["weights"]
+                )
+                .cpu()
+                .numpy()
+            )
+            consistency_chunks[comparison]["task_loss_absolute_difference"].append(
+                (batch_losses[left]["task"] - batch_losses[right]["task"])
+                .abs()
+                .cpu()
+                .numpy()
+            )
 
     sample_losses = {
         model: {loss: np.concatenate(chunks) for loss, chunks in losses.items()}
@@ -303,6 +371,63 @@ def evaluate(args: argparse.Namespace) -> None:
         model: _patient_means(values, sample_patient_ids)
         for model, values in sample_latents.items()
     }
+
+    consistency_frames = []
+    sample_metadata = samples[
+        ["sample_id", "patient_id", "sample_code", "tissue_label", "assignment"]
+    ]
+    for comparison, chunks in consistency_chunks.items():
+        metrics = {
+            metric: np.concatenate(values) for metric, values in chunks.items()
+        }
+        if any(len(values) != len(sample_metadata) for values in metrics.values()):
+            raise AssertionError(
+                "consistency metrics are not aligned with target samples"
+            )
+        consistency_frames.append(
+            sample_metadata.assign(comparison=comparison, **metrics)
+        )
+    retraining_consistency_per_sample = pd.concat(
+        consistency_frames, ignore_index=True
+    )
+    retraining_consistency_per_patient = (
+        retraining_consistency_per_sample.groupby(
+            ["comparison", "patient_id", "assignment"], sort=True, as_index=False
+        )
+        .agg(
+            tissue_label=("tissue_label", "first"),
+            n_samples=("sample_id", "size"),
+            **{metric: (metric, "mean") for metric in CONSISTENCY_METRICS},
+        )
+    )
+    consistency_summary_rows = []
+    for unit, values in (
+        ("sample", retraining_consistency_per_sample),
+        ("patient", retraining_consistency_per_patient),
+    ):
+        for assignment in ("forget", "retain"):
+            for comparison in retraining_consistency_per_sample["comparison"].unique():
+                subset = values[
+                    (values["assignment"] == assignment)
+                    & (values["comparison"] == comparison)
+                ]
+                consistency_summary_rows.append(
+                    {
+                        "unit": unit,
+                        "assignment": assignment,
+                        "comparison": comparison,
+                        "n": int(len(subset)),
+                        **{
+                            f"mean_{metric}": float(subset[metric].mean())
+                            for metric in CONSISTENCY_METRICS
+                        },
+                        **{
+                            f"median_{metric}": float(subset[metric].median())
+                            for metric in CONSISTENCY_METRICS
+                        },
+                    }
+                )
+    retraining_consistency_summary = pd.DataFrame(consistency_summary_rows)
 
     loss_rows = []
     for unit, values, assignments in (
@@ -400,6 +525,15 @@ def evaluate(args: argparse.Namespace) -> None:
     source_similarity.to_csv(
         output_dir / "source_representation_similarity.csv", index=False
     )
+    retraining_consistency_per_sample.to_csv(
+        output_dir / "retraining_consistency_per_sample.csv", index=False
+    )
+    retraining_consistency_per_patient.to_csv(
+        output_dir / "retraining_consistency_per_patient.csv", index=False
+    )
+    retraining_consistency_summary.to_csv(
+        output_dir / "retraining_consistency_summary.csv", index=False
+    )
     summary = {
         "baseline_checkpoint": str(Path(args.baseline_checkpoint).resolve()),
         "unlearned_checkpoint": str(Path(args.unlearned_checkpoint).resolve()),
@@ -433,6 +567,31 @@ def evaluate(args: argparse.Namespace) -> None:
                 "mean_paired_cosine_similarity",
                 "normalized_representation_change",
             ],
+            "retraining_consistency_per_sample.csv": [
+                "sample_id",
+                "patient_id",
+                "assignment",
+                "comparison",
+                *CONSISTENCY_METRICS,
+            ],
+            "retraining_consistency_per_patient.csv": [
+                "patient_id",
+                "assignment",
+                "comparison",
+                "n_samples",
+                *CONSISTENCY_METRICS,
+            ],
+            "retraining_consistency_summary.csv": [
+                "unit",
+                "assignment",
+                "comparison",
+                "n",
+                *[
+                    f"{statistic}_{metric}"
+                    for statistic in ("mean", "median")
+                    for metric in CONSISTENCY_METRICS
+                ],
+            ],
         },
     }
     with (output_dir / "evaluation_summary.json").open("w", encoding="utf-8") as handle:
@@ -454,6 +613,8 @@ def evaluate(args: argparse.Namespace) -> None:
     print(source_metrics.to_string(index=False))
     print("\n[GDSC source latent similarity]")
     print(source_similarity.to_string(index=False))
+    print("\n[retraining consistency]")
+    print(retraining_consistency_summary.to_string(index=False))
     print(f"[done] results -> {output_dir.resolve()}")
 
 
