@@ -237,8 +237,8 @@ expression을 새 checkpoint로 다시 align하고, 기존 파일을 덮어쓰�
 
 프로젝트 루트의 `unlearning_pipeline.sh`는 이 연결 과정을 실행한다. 기본 실행은
 split, 새 seed baseline, NegGrad+, deletion retraining, representation 평가이며,
-`embed` stage를 추가하면 NegGrad+ checkpoint로 TCGA CSG2A embedding을 새 run
-경로에 생성한다.
+`embed` stage를 추가하면 baseline, NegGrad+, retrained checkpoint 각각으로 TCGA
+CSG2A embedding을 새 run 경로에 생성한다.
 `predictor_test` stage는 `PREDICTOR_CKPT_DIR`로 기존 GDSC predictor의 10-fold
 checkpoint 경로를 지정했을 때만 실행한다. predictor는 재학습하지 않는다.
 
@@ -249,10 +249,31 @@ RUN_NAME=seed1 ORIGINAL_TRAIN_SEED=1 UNLEARN_SEED=1 SPLIT_SEED=1 BETA=0.9 \
 ./unlearning_pipeline.sh
 ```
 
-`DEPLOY_METHODS="baseline neggrad_plus retrain"`처럼 지정하면 세 checkpoint의
-TCGA embedding과 predictor test 결과를 각각 생성해 비교할 수 있다. 모든 command
-출력은 `run/<RUN_NAME>/pipeline.log`에 저장되고, 각 학습 단계의 `training.log`도
-각자의 `ckpts/`에 별도로 남는다.
+기본 `DEPLOY_METHODS`는 `baseline neggrad_plus retrain`이다. 세 checkpoint의
+TCGA embedding과 predictor test 결과를 각각 생성해 공정하게 비교한다. 빠른
+중간 확인만 필요하면 `DEPLOY_METHODS="neggrad_plus"`로 범위를 줄일 수 있다.
+모든 command 출력은 `run/<RUN_NAME>/pipeline.log`에 저장되고, 각 학습 단계의
+`training.log`도 각자의 `ckpts/`에 별도로 남는다.
+
+`predictor_test`는 predictor checkpoint를 새로 학습하지 않는다. 외부에 있는
+`THERAPI_predictor_CV0.pt`~`THERAPI_predictor_CV9.pt`의 상위 폴더를
+`PREDICTOR_CKPT_DIR`로 지정하면 pipeline이 각 method의 `ckpts/`에 symlink로
+연결하고 `test_TCGA.py`가 그 경로에서 `torch.load`한다. 예를 들어 기존 predictor가
+`/home/young/therapi/run/predictor_seed0/ckpts/`에 있다면 다음과 같이 쓴다.
+
+```bash
+PREDICTOR_CKPT_DIR=/home/young/therapi/run/predictor_seed0/ckpts \
+RUN_NAME=ngp_beta09_seed0 RESUME=1 \
+STAGES="embed predictor_test" \
+./unlearning_pipeline.sh
+```
+
+split은 predictor inference에 필요 없다. split manifest는 baseline, NegGrad,
+NegGrad+, retraining, representation evaluation에서만 동일한 파일을 재사용한다.
+따라서 위처럼 완료된 run에 embedding/predictor 단계만 추가할 때는 split을 새로
+생성하거나 지정할 필요가 없다. 같은 `RUN_NAME`의 baseline/retrain checkpoint를
+자동으로 찾고, 다른 위치라면 `BASELINE_CHECKPOINT`, `RETRAIN_CHECKPOINT`를
+명시하면 된다.
 
 ### Pipeline stage와 hyperparameter 실험
 

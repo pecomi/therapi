@@ -65,9 +65,9 @@ TIME=${TIME:-1.0}
 EMB_BATCH_SIZE=${EMB_BATCH_SIZE:-256}
 EMB_WORKERS=${EMB_WORKERS:-0}
 
-# ``embed`` and ``predictor_test`` act on each listed aligner.  Available
-# values are baseline, neggrad, neggrad_plus, and retrain.
-DEPLOY_METHODS=${DEPLOY_METHODS:-neggrad_plus}
+# ``embed`` and ``predictor_test`` compare the three evaluation references by
+# default. Available values are baseline, neggrad, neggrad_plus, and retrain.
+DEPLOY_METHODS=${DEPLOY_METHODS:-"baseline neggrad_plus retrain"}
 EVAL_UNLEARN_METHOD=${EVAL_UNLEARN_METHOD:-neggrad_plus}
 STAGES=${STAGES:-"split baseline neggrad_plus retrain evaluate"}
 RESUME=${RESUME:-0}
@@ -119,14 +119,13 @@ has_stage() {
     esac
 }
 
-if has_stage baseline; then
-    BASELINE_CHECKPOINT=$RUN_DIR/baseline/ckpts/THERAPI_aligner_${SOURCE}_${TARGET}.pt
-elif [ -z "$BASELINE_CHECKPOINT" ]; then
-    echo "BASELINE_CHECKPOINT is required when the baseline stage is omitted" >&2
-    exit 1
+run_baseline_checkpoint=$RUN_DIR/baseline/ckpts/THERAPI_aligner_${SOURCE}_${TARGET}.pt
+run_retrain_checkpoint=$RUN_DIR/retrain/ckpts/THERAPI_aligner_${SOURCE}_${TARGET}.pt
+if has_stage baseline || { [ -z "$BASELINE_CHECKPOINT" ] && [ -f "$run_baseline_checkpoint" ]; }; then
+    BASELINE_CHECKPOINT=$run_baseline_checkpoint
 fi
-if has_stage retrain; then
-    RETRAIN_CHECKPOINT=$RUN_DIR/retrain/ckpts/THERAPI_aligner_${SOURCE}_${TARGET}.pt
+if has_stage retrain || { [ -z "$RETRAIN_CHECKPOINT" ] && [ -f "$run_retrain_checkpoint" ]; }; then
+    RETRAIN_CHECKPOINT=$run_retrain_checkpoint
 fi
 
 require_file() {
@@ -274,7 +273,9 @@ if has_stage split; then
             --output-dir "$SPLIT_DIR"
     fi
 fi
-require_split
+if has_stage baseline || has_stage neggrad || has_stage neggrad_plus || has_stage retrain || has_stage evaluate; then
+    require_split
+fi
 
 if has_stage baseline; then
     log "baseline training"
