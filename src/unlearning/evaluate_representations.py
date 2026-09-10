@@ -40,10 +40,7 @@ RETRAINING_COMPARISONS = (
     ("unlearned", "retrained"),
 )
 CONSISTENCY_METRICS = (
-    "reconstruction_mse",
     "weighted_expression_mse",
-    "attention_js_divergence",
-    "task_loss_absolute_difference",
 )
 LEGACY_OUTPUTS = (
     "representation_change_per_sample.csv",
@@ -136,21 +133,6 @@ def _normalized_representation_change(x: np.ndarray, y: np.ndarray) -> float:
         (np.linalg.norm(x, ord="fro") ** 2 + np.linalg.norm(y, ord="fro") ** 2) / 2
     )
     return float(numerator / denominator) if denominator > 0 else float("nan")
-
-
-def _attention_js_divergence(left: torch.Tensor, right: torch.Tensor) -> torch.Tensor:
-    """Return one Jensen-Shannon divergence for each paired attention row."""
-    epsilon = torch.finfo(left.dtype).eps
-    mixture = (left + right) / 2
-    left_kl = (
-        left
-        * (left.clamp_min(epsilon).log() - mixture.clamp_min(epsilon).log())
-    ).sum(dim=1)
-    right_kl = (
-        right
-        * (right.clamp_min(epsilon).log() - mixture.clamp_min(epsilon).log())
-    ).sum(dim=1)
-    return (left_kl + right_kl) / 2
 
 
 def _patient_means(values: np.ndarray, patient_ids: np.ndarray) -> np.ndarray:
@@ -280,7 +262,6 @@ def evaluate(args: argparse.Namespace) -> None:
         target_gex = target_gex.to(device)
         labels = labels.to(device)
         batch_outputs = {}
-        batch_losses = {}
         for model_name in MODEL_NAMES:
             _, target_encoder, emb_classifier, exp_classifier, center = models[
                 model_name
@@ -309,39 +290,16 @@ def evaluate(args: argparse.Namespace) -> None:
                 )
             latent_chunks[model_name].append(latent.detach().cpu().numpy())
             batch_outputs[model_name] = {
-                "weights": weights,
                 "weighted_gex": weighted_gex,
-                "reconstruction": reconstruction,
             }
-            batch_losses[model_name] = losses
 
         for left, right in RETRAINING_COMPARISONS:
             comparison = f"{left}_vs_{right}"
             left_output, right_output = batch_outputs[left], batch_outputs[right]
-            consistency_chunks[comparison]["reconstruction_mse"].append(
-                (left_output["reconstruction"] - right_output["reconstruction"])
-                .pow(2)
-                .mean(dim=1)
-                .cpu()
-                .numpy()
-            )
             consistency_chunks[comparison]["weighted_expression_mse"].append(
                 (left_output["weighted_gex"] - right_output["weighted_gex"])
                 .pow(2)
                 .mean(dim=1)
-                .cpu()
-                .numpy()
-            )
-            consistency_chunks[comparison]["attention_js_divergence"].append(
-                _attention_js_divergence(
-                    left_output["weights"], right_output["weights"]
-                )
-                .cpu()
-                .numpy()
-            )
-            consistency_chunks[comparison]["task_loss_absolute_difference"].append(
-                (batch_losses[left]["task"] - batch_losses[right]["task"])
-                .abs()
                 .cpu()
                 .numpy()
             )
