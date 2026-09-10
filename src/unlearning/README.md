@@ -51,7 +51,8 @@ L_target = recon_weight * reconstruction_MSE
 `history.csv`의 `forget_task`와 `retain_task`는 매 epoch이 끝난 후 고정된 전체
 forget/retain set에서 계산한 sample mean이다. 학습 mini-batch loss와 구분한다.
 
-현재 두 unlearning 방법 모두 환자 정보가 흐르는 target-loss 경로만 갱신한다.
+두 방법 모두 환자 정보가 흐르는 target-loss 경로를 갱신한다. NegGrad+는
+삭제 대상이 아닌 GDSC도 retained source domain으로 매 step 함께 사용한다.
 
 - 갱신: source encoder, target Q/K, latent tissue classifier, expression tissue classifier
 - 고정: source decoder, target decoder, center anchor
@@ -111,11 +112,12 @@ python src/unlearning/retain_finetune.py \
 각 optimizer step에서 최소화하는 실제 목적함수는 다음과 같다.
 
 ```text
-L_NegGrad+ = beta * L_retain - (1 - beta) * L_forget
+L_NegGrad+ = beta * (L_GDSC + L_retain) - (1 - beta) * L_forget
 ```
 
 `beta`는 0 이상 1 이하이고 기본값은 `0.95`다. `history.csv`의
-`evaluation_objective`에는 전체-set mean으로 재계산한 위 목적함수가 기록된다.
+`evaluation_objective`에는 전체 GDSC와 고정 forget/retain set mean으로
+재계산한 위 목적함수가 기록된다. `source_task`은 같은 GDSC full-set loss다.
 
 ### Sampling과 재현성
 
@@ -137,10 +139,16 @@ shuffle 순서가 결정적으로 생성된다. 같은 데이터, PyTorch 환경
 partial batch의 sample 수가 서로 달라도 forget/retain 항의 계수는 `1-beta`와
 `beta`로 유지된다.
 
+GDSC source 673개는 삭제 대상이 아니므로 매 paired forget/retain step에서
+전체를 한 번 사용한다. 이는 원본 `train_aligner.py`가 매 TCGA batch마다 GDSC
+전체 source loss를 계산한 방식과 같다. source loss는 source encoder와 shared
+tissue classifier를 보존하는 gradient를 제공하며, target Q/K에는 직접 gradient를
+보내지 않는다.
+
 `summary.json`에는 다음 run 전체 처리량을 기록한다.
 
 - 완료 epoch 수와 전체 optimizer step 수
-- forget/retain batch 및 sample 노출 수
+- forget/retain/source sample 노출 수
 - forget set 크기로 나눈 `effective_forget_passes`
 
 NegGrad와 NegGrad+의 같은 epoch 수는 같은 연산량을 뜻하지 않는다. 예를 들어
@@ -171,6 +179,7 @@ Baseline checkpoint에서 fine-tune하지 않는다. 무작위 초기화부터 �
 | `epoch` | 0은 update 전 상태, 1 이상은 완료된 epoch |
 | `train_objective` | baseline/retrain의 mini-batch training loss 평균 |
 | `evaluation_objective` | 결과 비교에 쓰는 full-set mean 방법별 목적함수 |
+| `source_task` | NegGrad+에서 평가한 전체 GDSC source loss |
 | `forget_*`, `retain_*` | 고정 split에서 계산한 full-set target metrics |
 | `gradient_norm` | optimizer update 전 step gradient norm의 epoch 평균 |
 

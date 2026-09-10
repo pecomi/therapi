@@ -137,7 +137,7 @@ Two unlearning methods are implemented:
 
 - `gradient_ascent.py`: NegGrad, minimizing `-L_forget`.
 - `retain_finetune.py`: NegGrad+, minimizing
-  `beta * L_retain - (1 - beta) * L_forget`.
+  `beta * (L_GDSC + L_retain) - (1 - beta) * L_forget`.
 
 Run NegGrad from an original aligner checkpoint:
 
@@ -177,6 +177,11 @@ loader as its epoch length and cycles the epoch's shuffled forget batches until
 all retain batches are consumed. Seeded `DataLoader` generators make the
 epoch-to-epoch reshuffling deterministic. Compare runs using optimizer steps
 and forget/retain sample exposure as well as epoch count.
+
+At every NegGrad+ step, the full GDSC source set is also retained. Its source
+loss updates the source encoder and shared tissue classifiers alongside the
+TCGA retain/forget objective; it is not a separate post-unlearning fine-tuning
+stage.
 
 Both methods update the source encoder, target Q/K, and both tissue classifiers.
 The source decoder, target decoder, and center anchors remain fixed under the

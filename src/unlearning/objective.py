@@ -14,14 +14,27 @@ def neggrad_objective(forget_loss):
     return -forget_loss
 
 
-def neggrad_plus_objective(forget_loss, retain_loss, beta: float):
-    """Objective minimized by NegGrad+."""
-    return beta * retain_loss - (1.0 - beta) * forget_loss
+def neggrad_plus_objective(
+    forget_loss,
+    retain_loss,
+    beta: float,
+    *,
+    source_loss=None,
+):
+    """Objective minimized by NegGrad+, optionally retaining the source domain."""
+    retained_objective = retain_loss
+    if source_loss is not None:
+        retained_objective = retained_objective + source_loss
+    return beta * retained_objective - (1.0 - beta) * forget_loss
 
 
-def forward_aligner(models, target_gex, source_gex):
+def forward_aligner(models, target_gex, source_gex, *, source_latent=None):
     source_ae, target_encoder, emb_classifier, exp_classifier = models
-    source_z = source_ae.encoder(source_gex)
+    source_z = (
+        source_ae.encoder(source_gex)
+        if source_latent is None
+        else source_latent
+    )
     weights, latent, wgex, recon = target_encoder(target_gex, source_z, source_gex)
     return {
         "weights": weights,

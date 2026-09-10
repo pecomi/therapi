@@ -93,7 +93,7 @@ def _validate_args(args: argparse.Namespace) -> None:
 
 
 def joint_unlearn(args: argparse.Namespace) -> None:
-    """Run NegGrad+ by minimizing beta-weighted retain and forget losses."""
+    """Run NegGrad+ with GDSC and retain-TCGA as the retained data."""
     _validate_args(args)
     device = torch.device(args.device)
     data_dir = Path(args.data_dir)
@@ -223,6 +223,7 @@ def joint_unlearn(args: argparse.Namespace) -> None:
         shuffle=False,
     )
     source_gex = source_dataset.data.to(device)
+    source_labels = source_dataset.dis_label.to(device)
 
     def evaluate(loader):
         return evaluate_loader(
@@ -235,10 +236,40 @@ def joint_unlearn(args: argparse.Namespace) -> None:
             args.center_weight,
         )
 
+    @torch.no_grad()
+    def evaluate_source():
+        modules = (*models, center)
+        modes = [module.training for module in modules]
+        for module in modules:
+            module.eval()
+        source_latent, source_reconstruction = source_ae(source_gex)
+        source_output = {
+            "recon": source_reconstruction,
+            "latent": source_latent,
+            "emb_logits": emb_classifier(source_latent),
+            "exp_logits": exp_classifier(source_reconstruction),
+        }
+        source_losses = alignment_losses(
+            source_output,
+            source_gex,
+            source_labels,
+            center,
+            args.recon_weight,
+            args.class_weight,
+            args.center_weight,
+        )
+        for module, was_training in zip(modules, modes):
+            module.train(was_training)
+        return {name: value.item() for name, value in source_losses.items()}
+
     input_forget = evaluate(forget_eval_loader)
     input_retain = evaluate(retain_eval_loader)
+    input_source = evaluate_source()
     evaluation_objective = neggrad_plus_objective(
-        input_forget["task"], input_retain["task"], args.beta
+        input_forget["task"],
+        input_retain["task"],
+        args.beta,
+        source_loss=input_source["task"],
     )
     history = [
         split_metrics_row(
@@ -246,11 +277,13 @@ def joint_unlearn(args: argparse.Namespace) -> None:
             input_forget,
             input_retain,
             evaluation_objective=evaluation_objective,
+            source_task=input_source["task"],
         )
     ]
     print(
         f"[setup] forget_samples={len(forget_indices)} "
         f"retain_samples={len(retain_indices)} batch_size={args.batch_size} "
+        f"source_samples={len(source_dataset)} "
         f"beta={args.beta:.6f} "
         f"original_train_seed={args.original_train_seed} "
         f"unlearn_seed={args.unlearn_seed}"
@@ -261,6 +294,7 @@ def joint_unlearn(args: argparse.Namespace) -> None:
     cumulative_steps = 0
     cumulative_forget_samples = 0
     cumulative_retain_samples = 0
+    cumulative_source_samples = 0
     for epoch in range(1, args.epochs + 1):
         source_ae.encoder.train()
         target_encoder.Q.train()
@@ -280,7 +314,29 @@ def joint_unlearn(args: argparse.Namespace) -> None:
             retain_gex = retain_gex.to(device)
             retain_labels = retain_labels.to(device)
 
-            forget_output = forward_aligner(models, forget_gex, source_gex)
+            # The complete GDSC source set is retained at every paired target
+            # update, just as it is in the original joint aligner training.
+            # Reuse its latent in both target forwards so all three losses
+            # contribute to one source-encoder gradient.
+            source_latent, source_reconstruction = source_ae(source_gex)
+            source_output = {
+                "recon": source_reconstruction,
+                "latent": source_latent,
+                "emb_logits": emb_classifier(source_latent),
+                "exp_logits": exp_classifier(source_reconstruction),
+            }
+            source_losses = alignment_losses(
+                source_output,
+                source_gex,
+                source_labels,
+                center,
+                args.recon_weight,
+                args.class_weight,
+                args.center_weight,
+            )
+            forget_output = forward_aligner(
+                models, forget_gex, source_gex, source_latent=source_latent
+            )
             forget_losses = alignment_losses(
                 forget_output,
                 forget_gex,
@@ -290,7 +346,9 @@ def joint_unlearn(args: argparse.Namespace) -> None:
                 args.class_weight,
                 args.center_weight,
             )
-            retain_output = forward_aligner(models, retain_gex, source_gex)
+            retain_output = forward_aligner(
+                models, retain_gex, source_gex, source_latent=source_latent
+            )
             retain_losses = alignment_losses(
                 retain_output,
                 retain_gex,
@@ -301,12 +359,16 @@ def joint_unlearn(args: argparse.Namespace) -> None:
                 args.center_weight,
             )
             objective = neggrad_plus_objective(
-                forget_losses["task"], retain_losses["task"], args.beta
+                forget_losses["task"],
+                retain_losses["task"],
+                args.beta,
+                source_loss=source_losses["task"],
             )
             if not all(
                 torch.isfinite(value)
                 for value in (
                     objective,
+                    source_losses["task"],
                     forget_losses["task"],
                     retain_losses["task"],
                 )
@@ -333,6 +395,7 @@ def joint_unlearn(args: argparse.Namespace) -> None:
         cumulative_steps += optimizer_steps
         cumulative_forget_samples += forget_samples_seen
         cumulative_retain_samples += retain_samples_seen
+        cumulative_source_samples += optimizer_steps * len(source_dataset)
         gradient_norm = sum(total for total, _ in step_norms) / optimizer_steps
         mean_group_norms = {
             name: sum(norms[name] for _, norms in step_norms) / optimizer_steps
@@ -340,14 +403,19 @@ def joint_unlearn(args: argparse.Namespace) -> None:
         }
         forget_metrics = evaluate(forget_eval_loader)
         retain_metrics = evaluate(retain_eval_loader)
+        source_metrics = evaluate_source()
         evaluation_objective = neggrad_plus_objective(
-            forget_metrics["task"], retain_metrics["task"], args.beta
+            forget_metrics["task"],
+            retain_metrics["task"],
+            args.beta,
+            source_loss=source_metrics["task"],
         )
         if not all(
             math.isfinite(value)
             for value in (
                 forget_metrics["task"],
                 retain_metrics["task"],
+                source_metrics["task"],
                 evaluation_objective,
             )
         ):
@@ -359,6 +427,7 @@ def joint_unlearn(args: argparse.Namespace) -> None:
                 retain_metrics,
                 evaluation_objective=evaluation_objective,
                 gradient_norm=gradient_norm,
+                source_task=source_metrics["task"],
                 **{
                     f"grad_{name}": value
                     for name, value in mean_group_norms.items()
@@ -370,6 +439,7 @@ def joint_unlearn(args: argparse.Namespace) -> None:
 
     final_forget = forget_metrics
     final_retain = retain_metrics
+    final_source = source_metrics
     torch.save(
         {
             "epoch": checkpoint.get("epoch"),
@@ -391,10 +461,11 @@ def joint_unlearn(args: argparse.Namespace) -> None:
 
     summary = {
         "method": "neggrad_plus",
-        "objective": "minimize_beta_retain_loss_minus_one_minus_beta_forget_loss",
+        "objective": "minimize_beta_source_loss_plus_retain_loss_minus_one_minus_beta_forget_loss",
         "objective_coefficients": {
             "forget": -(1.0 - args.beta),
             "retain": args.beta,
+            "source": args.beta,
         },
         "original_checkpoint": str(input_checkpoint.resolve()),
         "checkpoint": str(checkpoint_path.resolve()),
@@ -404,19 +475,22 @@ def joint_unlearn(args: argparse.Namespace) -> None:
         "split_dir": str(Path(args.split_dir).resolve()),
         "trainable_groups": [name for name, _ in groups],
         "frozen_groups": ["source_decoder", "target_decoder", "center"],
-        "sampling": "retain_epoch_with_cycled_shuffled_forget_batches",
+        "sampling": "retain_epoch_with_cycled_shuffled_forget_batches_and_full_source_per_step",
         "completed_epochs": args.epochs,
         "batch_size": args.batch_size,
         "optimizer_steps": cumulative_steps,
         "forget_samples_seen": cumulative_forget_samples,
         "retain_samples_seen": cumulative_retain_samples,
+        "source_samples_seen": cumulative_source_samples,
         "effective_forget_passes": cumulative_forget_samples / len(forget_indices),
         "center_source": center_source,
         "config": vars(args),
         "initial_forget": input_forget,
         "initial_retain": input_retain,
+        "initial_source": input_source,
         "final_forget": final_forget,
         "final_retain": final_retain,
+        "final_source": final_source,
     }
     with (output_dir / "summary.json").open("w", encoding="utf-8") as handle:
         json.dump(summary, handle, indent=2, sort_keys=True)

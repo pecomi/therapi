@@ -68,6 +68,7 @@ def format_epoch_log(row: dict, total_epochs: int) -> str:
         "evaluation_objective",
         "forget_task",
         "retain_task",
+        "source_task",
         "gradient_norm",
     ):
         value = row.get(key)
