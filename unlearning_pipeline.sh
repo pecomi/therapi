@@ -36,6 +36,7 @@ FORGET_RATIO=${FORGET_RATIO:-0.05}
 RUN_NAME=${RUN_NAME:-unlearning_neggradplus_seed${UNLEARN_SEED}}
 SPLIT_DIR=${SPLIT_DIR:-$ROOT/splits/random_patient_5pct_seed${SPLIT_SEED}}
 BASELINE_CHECKPOINT=${BASELINE_CHECKPOINT:-}
+RETRAIN_CHECKPOINT=${RETRAIN_CHECKPOINT:-}
 PREDICTOR_CKPT_DIR=${PREDICTOR_CKPT_DIR:-}
 PREDICTOR_NAME=${PREDICTOR_NAME:-THERAPI_predictor}
 
@@ -83,6 +84,9 @@ to_absolute() {
 if [ -n "$BASELINE_CHECKPOINT" ]; then
     BASELINE_CHECKPOINT=$(to_absolute "$BASELINE_CHECKPOINT")
 fi
+if [ -n "$RETRAIN_CHECKPOINT" ]; then
+    RETRAIN_CHECKPOINT=$(to_absolute "$RETRAIN_CHECKPOINT")
+fi
 SPLIT_DIR=$(to_absolute "$SPLIT_DIR")
 CSG2A_CKPT=$(to_absolute "$CSG2A_CKPT")
 STRING_EDGES=$(to_absolute "$STRING_EDGES")
@@ -121,6 +125,9 @@ elif [ -z "$BASELINE_CHECKPOINT" ]; then
     echo "BASELINE_CHECKPOINT is required when the baseline stage is omitted" >&2
     exit 1
 fi
+if has_stage retrain; then
+    RETRAIN_CHECKPOINT=$RUN_DIR/retrain/ckpts/THERAPI_aligner_${SOURCE}_${TARGET}.pt
+fi
 
 require_file() {
     [ -f "$1" ] || { echo "missing required file: $1" >&2; exit 1; }
@@ -136,7 +143,7 @@ checkpoint_for() {
         baseline) printf '%s\n' "$BASELINE_CHECKPOINT" ;;
         neggrad) printf '%s\n' "$RUN_DIR/neggrad/ckpts/THERAPI_aligner_${SOURCE}_${TARGET}.pt" ;;
         neggrad_plus) printf '%s\n' "$RUN_DIR/neggrad_plus/ckpts/THERAPI_aligner_${SOURCE}_${TARGET}.pt" ;;
-        retrain) printf '%s\n' "$RUN_DIR/retrain/ckpts/THERAPI_aligner_${SOURCE}_${TARGET}.pt" ;;
+        retrain) printf '%s\n' "$RETRAIN_CHECKPOINT" ;;
         *) echo "unknown deployment method: $1" >&2; exit 1 ;;
     esac
 }
@@ -245,6 +252,7 @@ printf '%s\n' \
     "run_dir=$RUN_DIR" \
     "stages=$STAGES" \
     "baseline_checkpoint=$BASELINE_CHECKPOINT" \
+    "retrain_checkpoint=${RETRAIN_CHECKPOINT:-generated_by_retrain_stage}" \
     "split_dir=$SPLIT_DIR" \
     "device=$DEVICE" \
     "original_train_seed=$ORIGINAL_TRAIN_SEED" \

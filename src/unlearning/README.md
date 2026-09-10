@@ -255,6 +255,72 @@ TCGA embedding과 predictor test 결과를 각각 생성해 비교할 수 있다
 출력은 `run/<RUN_NAME>/pipeline.log`에 저장되고, 각 학습 단계의 `training.log`도
 각자의 `ckpts/`에 별도로 남는다.
 
+### Pipeline stage와 hyperparameter 실험
+
+`STAGES`는 공백으로 구분한 실행 단계다.
+
+| stage | 수행 내용 | 언제 쓰는가 |
+| --- | --- | --- |
+| `split` | manifest가 없을 때 patient-level split 생성, 있으면 재사용 | 새 삭제 집합 생성 시 |
+| `baseline` | `ORIGINAL_TRAIN_SEED`으로 원본 aligner 학습 | 새 baseline seed 실험 시 |
+| `neggrad` | NegGrad 실행 | NegGrad 비교 시 |
+| `neggrad_plus` | NegGrad+ 실행 | 기본 unlearning 실험 |
+| `retrain` | retain-only deletion retraining | 새 reference checkpoint가 필요할 때 |
+| `evaluate` | baseline/unlearned/retrained representation 평가 | 후보 설정 평가 시 |
+| `embed` | `DEPLOY_METHODS`별 TCGA CSG2A embedding 재생성 | 최종 checkpoint 선택 후 |
+| `predictor_test` | 기존 predictor checkpoint로 TCGA 추론 | 최종 predictor 결과 산출 시 |
+
+기본값은 `split baseline neggrad_plus retrain evaluate`다. 즉 새 `RUN_NAME`으로
+실행하면 새 baseline seed부터 결과를 만든다. 출력은
+`run/<RUN_NAME>/baseline`, `neggrad_plus`, `retrain`, `evaluation`에 분리된다.
+같은 `RUN_NAME`이 이미 있으면 기본적으로 `_2` suffix를 붙인다. `RESUME=1`은
+이미 생성한 run에 `embed`나 `predictor_test`처럼 뒤 단계만 추가할 때만 사용한다.
+
+hyperparameter 후보 탐색에서는 baseline과 split을 고정하고 `neggrad_plus`만
+실행한다. 다음 예시는 beta와 learning rate만 바꾼 후보 하나를 만든다.
+
+```bash
+BASELINE_CHECKPOINT=run/baseline_seed0/ckpts/THERAPI_aligner_GDSC_TCGA.pt \
+SPLIT_DIR=splits/random_patient_5pct_seed0 \
+RUN_NAME=ngp_beta090_lr3e4_seed0 \
+STAGES="neggrad_plus" \
+ORIGINAL_TRAIN_SEED=0 UNLEARN_SEED=0 \
+BETA=0.90 NEGGRAD_PLUS_LR=3e-4 \
+NEGGRAD_PLUS_EPOCHS=30 NEGGRAD_PLUS_BATCH_SIZE=128 \
+./unlearning_pipeline.sh
+```
+
+이 단계에서는 `history.csv`, loss curve, `training.log`를 보고 후보를 고른다.
+representation 평가까지 반복하려면 `evaluate`는 retrained checkpoint를 요구한다.
+같은 split의 retrained reference는 한 번만 만든 뒤 `RETRAIN_CHECKPOINT`로 재사용할
+수 있다.
+
+```bash
+BASELINE_CHECKPOINT=run/baseline_seed0/ckpts/THERAPI_aligner_GDSC_TCGA.pt \
+RETRAIN_CHECKPOINT=run/retrain_retain_5pct_seed0/ckpts/THERAPI_aligner_GDSC_TCGA.pt \
+SPLIT_DIR=splits/random_patient_5pct_seed0 \
+RUN_NAME=ngp_beta090_lr3e4_seed0 \
+STAGES="neggrad_plus evaluate" \
+BETA=0.90 NEGGRAD_PLUS_LR=3e-4 \
+./unlearning_pipeline.sh
+```
+
+조절 가능한 주요 변수는 다음과 같다.
+
+| 목적 | 변수 |
+| --- | --- |
+| NegGrad+ | `BETA`, `NEGGRAD_PLUS_LR`, `NEGGRAD_PLUS_EPOCHS`, `NEGGRAD_PLUS_BATCH_SIZE` |
+| NegGrad | `NEGGRAD_LR`, `NEGGRAD_EPOCHS`, `NEGGRAD_BATCH_SIZE` |
+| baseline | `BASELINE_LR`, `BASELINE_EPOCHS`, `BASELINE_BATCH_SIZE` |
+| retraining | `RETRAIN_LR`, `RETRAIN_EPOCHS`, `RETRAIN_BATCH_SIZE` |
+| 공통 모델/목적함수 | `LATENT_DIM`, `RECON_WEIGHT`, `CLASS_WEIGHT`, `CENTER_WEIGHT` |
+| split | `SPLIT_DIR`, 새 manifest 생성 시 `FORGET_RATIO`, `SPLIT_SEED` |
+| deployment | `DEPLOY_METHODS`, `PREDICTOR_CKPT_DIR`, `CSG2A_CKPT`, `DOSE`, `TIME` |
+
+`FORGET_RATIO`를 기본 0.05와 다르게 쓸 때는 ratio가 반영된 새 `SPLIT_DIR`을 직접
+지정해야 한다. 기존 manifest 경로가 있으면 `split` stage는 seed나 ratio와 무관하게
+그 파일을 그대로 재사용한다.
+
 각 run의 `ckpts/`에는 다음 파일이 생성된다.
 
 ```text
