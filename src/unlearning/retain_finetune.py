@@ -499,7 +499,7 @@ if __name__ == "__main__":
     parser.add_argument("--tissue-column", default="tissue_label")
     parser.add_argument("--info-id-column", default=None)
     parser.add_argument("--latent-dim", type=int, default=128)
-    parser.add_argument("--epochs", type=int, default=30)
+    parser.add_argument("--epochs", type=int, default=50)
     parser.add_argument("--batch-size", type=int, default=128)
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--recon-weight", type=float, default=0.2)
@@ -511,5 +511,5 @@ if __name__ == "__main__":
         default="log",
         help="y-axis scale for the saved full-set loss curve",
     )
-    parser.add_argument("--beta", type=float, default=0.95)
+    parser.add_argument("--beta", type=float, default=0.9)
     joint_unlearn(parser.parse_args())
