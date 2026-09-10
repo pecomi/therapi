@@ -105,7 +105,11 @@ if [ -d "$RUN_DIR" ] && [ "$RESUME" != 1 ]; then
 fi
 mkdir -p "$RUN_DIR"
 PIPELINE_LOG=$RUN_DIR/pipeline.log
-: > "$PIPELINE_LOG"
+# A deployment-only resume must leave the existing run record intact.  Starting
+# a fresh run still creates a fresh log, while RESUME=1 appends to it.
+if [ "$RESUME" != "1" ]; then
+    : > "$PIPELINE_LOG"
+fi
 exec > >(tee -a "$PIPELINE_LOG") 2>&1
 
 log() {
