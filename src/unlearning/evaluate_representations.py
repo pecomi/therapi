@@ -1,4 +1,4 @@
-"""Compare aligner losses and latent geometry for baseline/unlearned/retrained models."""
+"""Compare target unlearning and GDSC-source preservation across aligners."""
 
 from __future__ import annotations
 
@@ -110,6 +110,24 @@ def _frechet_distance(x: np.ndarray, y: np.ndarray, eps: float) -> float:
     return float(max(distance, 0.0))
 
 
+def _mean_cosine_similarity(x: np.ndarray, y: np.ndarray) -> float:
+    """Mean paired cosine similarity; source rows are paired by cell-line ID."""
+    denominator = np.linalg.norm(x, axis=1) * np.linalg.norm(y, axis=1)
+    valid = denominator > 0
+    if not valid.any():
+        return float("nan")
+    return float((np.einsum("ij,ij->i", x[valid], y[valid]) / denominator[valid]).mean())
+
+
+def _normalized_representation_change(x: np.ndarray, y: np.ndarray) -> float:
+    """Symmetric Frobenius change between two paired representation matrices."""
+    numerator = np.linalg.norm(x - y, ord="fro")
+    denominator = np.sqrt(
+        (np.linalg.norm(x, ord="fro") ** 2 + np.linalg.norm(y, ord="fro") ** 2) / 2
+    )
+    return float(numerator / denominator) if denominator > 0 else float("nan")
+
+
 def _patient_means(values: np.ndarray, patient_ids: np.ndarray) -> np.ndarray:
     frame = pd.DataFrame(values)
     frame["patient_id"] = patient_ids
@@ -180,9 +198,44 @@ def evaluate(args: argparse.Namespace) -> None:
         )
 
     source_gex = source_dataset.data.to(device)
+    source_labels = source_dataset.dis_label.to(device)
     source_latents = {
         name: modules[0].encoder(source_gex) for name, modules in models.items()
     }
+    source_losses = {}
+    source_accuracies = {}
+    for model_name, modules in models.items():
+        source_ae, _, emb_classifier, exp_classifier, center = modules
+        source_latent, source_reconstruction = source_ae(source_gex)
+        source_output = {
+            "recon": source_reconstruction,
+            "latent": source_latent,
+            "emb_logits": emb_classifier(source_latent),
+            "exp_logits": exp_classifier(source_reconstruction),
+        }
+        source_losses[model_name] = per_sample_alignment_losses(
+            source_output,
+            source_gex,
+            source_labels,
+            center,
+            args.recon_weight,
+            args.class_weight,
+            args.center_weight,
+        )
+        source_accuracies[model_name] = {
+            "emb_accuracy": float(
+                (source_output["emb_logits"].argmax(dim=1) == source_labels)
+                .float()
+                .mean()
+                .item()
+            ),
+            "exp_accuracy": float(
+                (source_output["exp_logits"].argmax(dim=1) == source_labels)
+                .float()
+                .mean()
+                .item()
+            ),
+        }
     loader = DataLoader(
         target_dataset,
         batch_size=args.batch_size,
@@ -298,9 +351,54 @@ def evaluate(args: argparse.Namespace) -> None:
                 )
     representation_similarity = pd.DataFrame(similarity_rows)
 
+    source_metrics = pd.DataFrame(
+        [
+            {
+                "model": model_name,
+                "n": len(source_dataset),
+                **{
+                    loss_name: float(values.mean().item())
+                    for loss_name, values in source_losses[model_name].items()
+                },
+                **source_accuracies[model_name],
+            }
+            for model_name in MODEL_NAMES
+        ]
+    )
+    source_latents_numpy = {
+        name: values.cpu().numpy() for name, values in source_latents.items()
+    }
+    source_similarity = pd.DataFrame(
+        [
+            {
+                "comparison": f"{left}_vs_{right}",
+                "n": len(source_dataset),
+                "linear_cka": _linear_cka(
+                    source_latents_numpy[left], source_latents_numpy[right]
+                ),
+                "frechet_latent_distance": _frechet_distance(
+                    source_latents_numpy[left],
+                    source_latents_numpy[right],
+                    args.frechet_eps,
+                ),
+                "mean_paired_cosine_similarity": _mean_cosine_similarity(
+                    source_latents_numpy[left], source_latents_numpy[right]
+                ),
+                "normalized_representation_change": _normalized_representation_change(
+                    source_latents_numpy[left], source_latents_numpy[right]
+                ),
+            }
+            for left, right in COMPARISONS
+        ]
+    )
+
     loss_metrics.to_csv(output_dir / "loss_metrics.csv", index=False)
     representation_similarity.to_csv(
         output_dir / "representation_similarity.csv", index=False
+    )
+    source_metrics.to_csv(output_dir / "source_metrics.csv", index=False)
+    source_similarity.to_csv(
+        output_dir / "source_representation_similarity.csv", index=False
     )
     summary = {
         "baseline_checkpoint": str(Path(args.baseline_checkpoint).resolve()),
@@ -324,6 +422,17 @@ def evaluate(args: argparse.Namespace) -> None:
                 "linear_cka",
                 "frechet_latent_distance",
             ],
+            "source_metrics.csv": [
+                *LOSS_NAMES,
+                "emb_accuracy",
+                "exp_accuracy",
+            ],
+            "source_representation_similarity.csv": [
+                "linear_cka",
+                "frechet_latent_distance",
+                "mean_paired_cosine_similarity",
+                "normalized_representation_change",
+            ],
         },
     }
     with (output_dir / "evaluation_summary.json").open("w", encoding="utf-8") as handle:
@@ -341,6 +450,10 @@ def evaluate(args: argparse.Namespace) -> None:
     print(loss_metrics.to_string(index=False))
     print("\n[latent CKA / Frechet distance]")
     print(representation_similarity.to_string(index=False))
+    print("\n[GDSC source metrics]")
+    print(source_metrics.to_string(index=False))
+    print("\n[GDSC source latent similarity]")
+    print(source_similarity.to_string(index=False))
     print(f"[done] results -> {output_dir.resolve()}")
 
 

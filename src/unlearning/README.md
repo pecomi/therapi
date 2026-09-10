@@ -139,7 +139,7 @@ partial batch의 sample 수가 서로 달라도 forget/retain 항의 계수는 `
 
 `summary.json`에는 다음 run 전체 처리량을 기록한다.
 
-- epoch/cumulative optimizer step 수
+- 완료 epoch 수와 전체 optimizer step 수
 - forget/retain batch 및 sample 노출 수
 - forget set 크기로 나눈 `effective_forget_passes`
 
@@ -181,6 +181,38 @@ Baseline checkpoint에서 fine-tune하지 않는다. 무작위 초기화부터 �
 Baseline을 split 없이 학습하면 forget/retain 관련 칼럼은 비어 있고 loss curve는
 생성하지 않는다. Split을 주면 학습 데이터에는 영향을 주지 않고 metric만
 추가한다.
+
+## 7. 사후 평가: target unlearning과 GDSC 보존
+
+`evaluate_representations.py`는 동일한 baseline, unlearned, retrained
+checkpoint를 사용해 TCGA forget/retain 평가와 GDSC source 보존 평가를 함께
+수행한다.
+
+```bash
+python src/unlearning/evaluate_representations.py \
+  --data-dir data \
+  --baseline-checkpoint run/baseline/ckpts/THERAPI_aligner_GDSC_TCGA.pt \
+  --unlearned-checkpoint run/neggrad_plus_seed0/ckpts/THERAPI_aligner_GDSC_TCGA.pt \
+  --retrained-checkpoint run/retrain_seed0/ckpts/THERAPI_aligner_GDSC_TCGA.pt \
+  --split-dir splits/random_patient_5pct_seed0 \
+  --output-dir run/evaluation_seed0 \
+  --device cuda:0
+```
+
+GDSC는 환자 split과 무관하므로 전체 cell line을 한 번 평가한다.
+`source_metrics.csv`에는 원래 source objective의 항별 평균(`task`, `recon`,
+`emb_class`, `exp_class`, `center`)과 두 tissue classifier accuracy를 기록한다.
+`source_representation_similarity.csv`에는 같은 GDSC cell line이 checkpoint
+사이에서 얼마나 바뀌었는지 기록한다.
+
+- `linear_cka`, `frechet_latent_distance`: 분포·기하 수준의 비교
+- `mean_paired_cosine_similarity`, `normalized_representation_change`: 동일 cell
+  line의 직접적인 paired 변화량
+
+unlearning checkpoint가 배포용 새 aligner checkpoint다. GDSC 원본을 다시
+학습하거나 GDSC drug-response predictor를 재학습할 필요는 없다. 다만 환자
+expression을 새 checkpoint로 다시 align하고, 기존 파일을 덮어쓰지 않는 별도
+출력 경로에 새 CSG2A embedding을 만들어야 한다.
 
 각 run의 `ckpts/`에는 다음 파일이 생성된다.
 
