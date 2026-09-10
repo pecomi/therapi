@@ -212,6 +212,9 @@ link_predictor_checkpoints() {
         echo "PREDICTOR_CKPT_DIR is required for predictor_test" >&2
         exit 1
     }
+    # A reused external baseline has no local training artifact directory.
+    # Create it before linking the fixed predictor checkpoints for testing.
+    mkdir -p "$method_dir/ckpts"
     for fold in $(seq 0 9); do
         source_checkpoint=$PREDICTOR_CKPT_DIR/${PREDICTOR_NAME}_CV${fold}.pt
         destination=$method_dir/ckpts/${PREDICTOR_NAME}_CV${fold}.pt
