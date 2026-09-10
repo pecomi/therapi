@@ -6,23 +6,19 @@ set -euo pipefail
 # The predictor is trained only on GDSC, so a new unlearning checkpoint requires
 # a new *target* (TCGA) CSG2A embedding, not GDSC embedding or predictor training.
 #
-# Required:
-#   BASELINE_CHECKPOINT=run/baseline_seed0/ckpts/THERAPI_aligner_GDSC_TCGA.pt \
-#     ./unlearning_pipeline.sh
-#
 # Examples:
-#   # NegGrad+ and deletion retraining, then representation evaluation.
-#   BASELINE_CHECKPOINT=run/baseline_seed0/ckpts/THERAPI_aligner_GDSC_TCGA.pt \
-#     RUN_NAME=neggradplus_beta09_seed0 BETA=0.9 ./unlearning_pipeline.sh
+#   # Complete new-seed experiment: baseline -> NegGrad+ -> retraining -> evaluation.
+#   RUN_NAME=seed1 ORIGINAL_TRAIN_SEED=1 UNLEARN_SEED=1 SPLIT_SEED=1 \
+#     ./unlearning_pipeline.sh
 #
 #   # Also regenerate TCGA embeddings and test existing predictor checkpoints.
-#   BASELINE_CHECKPOINT=run/baseline_seed0/ckpts/THERAPI_aligner_GDSC_TCGA.pt \
 #   PREDICTOR_CKPT_DIR=run/predictor_seed0/ckpts \
-#   STAGES="split neggrad_plus retrain evaluate embed predictor_test" \
+#   STAGES="split baseline neggrad_plus retrain evaluate embed predictor_test" \
 #     ./unlearning_pipeline.sh
 #
-# Reuse an existing run's artifacts only when this is intentional:
-#   RESUME=1 STAGES="embed predictor_test" ... ./unlearning_pipeline.sh
+# To reuse a fixed existing baseline rather than train it, omit ``baseline``:
+#   BASELINE_CHECKPOINT=run/baseline_seed0/ckpts/THERAPI_aligner_GDSC_TCGA.pt \
+#   STAGES="neggrad_plus retrain evaluate" ./unlearning_pipeline.sh
 
 ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 SRC=$ROOT/src
@@ -43,11 +39,9 @@ BASELINE_CHECKPOINT=${BASELINE_CHECKPOINT:-}
 PREDICTOR_CKPT_DIR=${PREDICTOR_CKPT_DIR:-}
 PREDICTOR_NAME=${PREDICTOR_NAME:-THERAPI_predictor}
 
-if [ -z "$BASELINE_CHECKPOINT" ]; then
-    echo "BASELINE_CHECKPOINT must be supplied" >&2
-    exit 1
-fi
-
+BASELINE_EPOCHS=${BASELINE_EPOCHS:-199}
+BASELINE_BATCH_SIZE=${BASELINE_BATCH_SIZE:-128}
+BASELINE_LR=${BASELINE_LR:-1e-3}
 NEGGRAD_EPOCHS=${NEGGRAD_EPOCHS:-30}
 NEGGRAD_BATCH_SIZE=${NEGGRAD_BATCH_SIZE:-64}
 NEGGRAD_LR=${NEGGRAD_LR:-1e-5}
@@ -74,7 +68,7 @@ EMB_WORKERS=${EMB_WORKERS:-0}
 # values are baseline, neggrad, neggrad_plus, and retrain.
 DEPLOY_METHODS=${DEPLOY_METHODS:-neggrad_plus}
 EVAL_UNLEARN_METHOD=${EVAL_UNLEARN_METHOD:-neggrad_plus}
-STAGES=${STAGES:-"split neggrad_plus retrain evaluate"}
+STAGES=${STAGES:-"split baseline neggrad_plus retrain evaluate"}
 RESUME=${RESUME:-0}
 
 to_absolute() {
@@ -86,7 +80,9 @@ to_absolute() {
     fi
 }
 
-BASELINE_CHECKPOINT=$(to_absolute "$BASELINE_CHECKPOINT")
+if [ -n "$BASELINE_CHECKPOINT" ]; then
+    BASELINE_CHECKPOINT=$(to_absolute "$BASELINE_CHECKPOINT")
+fi
 SPLIT_DIR=$(to_absolute "$SPLIT_DIR")
 CSG2A_CKPT=$(to_absolute "$CSG2A_CKPT")
 STRING_EDGES=$(to_absolute "$STRING_EDGES")
@@ -118,6 +114,13 @@ has_stage() {
         *) return 1 ;;
     esac
 }
+
+if has_stage baseline; then
+    BASELINE_CHECKPOINT=$RUN_DIR/baseline/ckpts/THERAPI_aligner_${SOURCE}_${TARGET}.pt
+elif [ -z "$BASELINE_CHECKPOINT" ]; then
+    echo "BASELINE_CHECKPOINT is required when the baseline stage is omitted" >&2
+    exit 1
+fi
 
 require_file() {
     [ -f "$1" ] || { echo "missing required file: $1" >&2; exit 1; }
@@ -232,7 +235,6 @@ test_predictor() {
 }
 
 [ -d "$DATA" ] || { echo "missing data directory: $DATA" >&2; exit 1; }
-require_file "$BASELINE_CHECKPOINT"
 "$PYTHON" -c 'import torch, pandas' 2>/dev/null || {
     echo "$PYTHON cannot import torch and pandas; activate the experiment environment first" >&2
     exit 1
@@ -265,6 +267,28 @@ if has_stage split; then
     fi
 fi
 require_split
+
+if has_stage baseline; then
+    log "baseline training"
+    mkdir -p "$RUN_DIR/baseline"
+    (
+        cd "$RUN_DIR/baseline"
+        "$PYTHON" "$SRC/train_aligner.py" \
+            --data-dir "$DATA" \
+            --source "$SOURCE" --target "$TARGET" \
+            --split-dir "$SPLIT_DIR" \
+            --device "$DEVICE" \
+            --seed "$ORIGINAL_TRAIN_SEED" \
+            --latent-dim "$LATENT_DIM" \
+            --epochs "$BASELINE_EPOCHS" \
+            --batch-size "$BASELINE_BATCH_SIZE" \
+            --lr "$BASELINE_LR" \
+            --recon-weight "$RECON_WEIGHT" \
+            --class-weight "$CLASS_WEIGHT" \
+            --center-weight "$CENTER_WEIGHT"
+    )
+fi
+require_file "$BASELINE_CHECKPOINT"
 
 if has_stage neggrad; then
     log "NegGrad"

@@ -10,6 +10,7 @@ from torch.utils.data import DataLoader, Subset
 
 from model import *
 from unlearning.loss_history import (
+    RunLogger,
     format_epoch_log,
     plot_history,
     plot_retain_history,
@@ -18,7 +19,7 @@ from unlearning.loss_history import (
 )
 from unlearning.objective import EVALUATION_BATCH_SIZE, evaluate_loader
 from unlearning.split import build_sample_table, load_manifest_indices
-from utils import set_seed, Logger
+from utils import set_seed
 from center_loss import CenterLoss
 
 
@@ -41,8 +42,9 @@ def _validate_args(args):
 def train_aligner(args):
     _validate_args(args)
     model_name = f'THERAPI_aligner_{args.source}_{args.target}'
-    logger = Logger(model_name)
-    logger('Start training {} model'.format(model_name))
+    output_dir = Path('ckpts')
+    output_dir.mkdir(parents=True, exist_ok=True)
+    logger = RunLogger(output_dir / 'training.log')
     set_seed(args.seed, logger=lambda _: None)
 
     # parameters
@@ -89,9 +91,6 @@ def train_aligner(args):
     center_criterion = CenterLoss(num_classes=num_tissue, feat_dim=dim_latent, device=args.device)
     classifier_criterion = nn.CrossEntropyLoss()
     optimizer = torch.optim.Adam(list(source_AE.parameters())+list(target_weightencoder.parameters())+list(emb_dis_classifier.parameters())+list(exp_dis_classifier.parameters()), lr=lr)
-
-    if not os.path.exists('ckpts'):
-        os.makedirs('ckpts', exist_ok=True)
 
     # Optional split tracking does not participate in optimization. It evaluates
     # the target loss on fixed, full forget/retain sets before training and after
@@ -142,7 +141,7 @@ def train_aligner(args):
         )
     )
     logger(
-        f'[setup] target_samples={len(target_unlabeled_dataset)} '
+        f'[setup] model={model_name} target_samples={len(target_unlabeled_dataset)} '
         f'batch_size={args.batch_size} '
         f'seed={args.seed}'
     )
@@ -217,7 +216,7 @@ def train_aligner(args):
         logger(format_epoch_log(history[-1], args.epochs))
 
     # save model
-    checkpoint_path = Path(f'ckpts/{model_name}.pt')
+    checkpoint_path = output_dir / f'{model_name}.pt'
     torch.save({'epoch': epoch,
                 'method': 'baseline',
                 'completed_epochs': args.epochs,
@@ -230,8 +229,8 @@ def train_aligner(args):
                 'optimizer': optimizer.state_dict(),
                 'config': vars(args),
                 }, checkpoint_path)
-    history_path = Path('ckpts/history.csv')
-    curve_path = Path('ckpts/loss_curve.png')
+    history_path = output_dir / 'history.csv'
+    curve_path = output_dir / 'loss_curve.png'
     write_history(history, history_path)
     if initial_forget is not None:
         plot_history(
@@ -240,7 +239,7 @@ def train_aligner(args):
             args.loss_scale,
             epoch_label='baseline training epoch',
         )
-        retain_curve_path = Path('ckpts/retain_loss_curve.png')
+        retain_curve_path = output_dir / 'retain_loss_curve.png'
         plot_retain_history(
             history,
             retain_curve_path,
@@ -264,6 +263,7 @@ def train_aligner(args):
             args.epochs * len(retain_indices) if retain_indices is not None else None
         ),
         "checkpoint": str(checkpoint_path.resolve()),
+        "training_log": str((output_dir / 'training.log').resolve()),
         "history": str(history_path.resolve()),
         "loss_curve": str(curve_path.resolve()) if initial_forget is not None else None,
         "retain_loss_curve": (
@@ -278,7 +278,7 @@ def train_aligner(args):
         "final_forget": forget_metrics,
         "final_retain": retain_metrics,
     }
-    with Path('ckpts/summary.json').open('w', encoding='utf-8') as handle:
+    with (output_dir / 'summary.json').open('w', encoding='utf-8') as handle:
         json.dump(summary, handle, indent=2, sort_keys=True)
         handle.write('\n')
     logger(f'[done] checkpoint={checkpoint_path.resolve()} history={history_path.resolve()}')

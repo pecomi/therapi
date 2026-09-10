@@ -237,16 +237,16 @@ expression을 새 checkpoint로 다시 align하고, 기존 파일을 덮어쓰�
 출력 경로에 새 CSG2A embedding을 만들어야 한다.
 
 프로젝트 루트의 `unlearning_pipeline.sh`는 이 연결 과정을 실행한다. 기본 실행은
-split, NegGrad+, deletion retraining, representation 평가이며, `embed` stage를
-추가하면 NegGrad+ checkpoint로 TCGA CSG2A embedding을 새 run 경로에 생성한다.
+split, 새 seed baseline, NegGrad+, deletion retraining, representation 평가이며,
+`embed` stage를 추가하면 NegGrad+ checkpoint로 TCGA CSG2A embedding을 새 run
+경로에 생성한다.
 `predictor_test` stage는 `PREDICTOR_CKPT_DIR`로 기존 GDSC predictor의 10-fold
 checkpoint 경로를 지정했을 때만 실행한다. predictor는 재학습하지 않는다.
 
 ```bash
-BASELINE_CHECKPOINT=run/baseline_seed0/ckpts/THERAPI_aligner_GDSC_TCGA.pt \
 PREDICTOR_CKPT_DIR=run/predictor_seed0/ckpts \
-STAGES="split neggrad_plus retrain evaluate embed predictor_test" \
-RUN_NAME=neggradplus_beta09_seed0 BETA=0.9 \
+STAGES="split baseline neggrad_plus retrain evaluate embed predictor_test" \
+RUN_NAME=seed1 ORIGINAL_TRAIN_SEED=1 UNLEARN_SEED=1 SPLIT_SEED=1 BETA=0.9 \
 ./unlearning_pipeline.sh
 ```
 
