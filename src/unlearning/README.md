@@ -145,11 +145,10 @@ GDSC source 673개는 삭제 대상이 아니므로 매 paired forget/retain ste
 tissue classifier를 보존하는 gradient를 제공하며, target Q/K에는 직접 gradient를
 보내지 않는다.
 
-`summary.json`에는 다음 run 전체 처리량을 기록한다.
-
-- 완료 epoch 수와 전체 optimizer step 수
-- forget/retain/source sample 노출 수
-- forget set 크기로 나눈 `effective_forget_passes`
+`summary.json`에는 run을 식별하는 최소 정보만 기록한다: method, 완료 epoch,
+입력 baseline checkpoint(해당 시), split, sample 노출 수와 생성된 artifact 경로다.
+목적함수 정의와 인자 설정은 코드 및 checkpoint 내부 `config`에, epoch별 metric은
+`history.csv`에 각각 한 번만 기록한다.
 
 NegGrad와 NegGrad+의 같은 epoch 수는 같은 연산량을 뜻하지 않는다. 예를 들어
 forget 401개, retain 7,641개, batch size 128이면 NegGrad는 epoch당 4 step,
@@ -336,6 +335,6 @@ ckpts/
 `loss_curve.png`는 forget component, `retain_loss_curve.png`는 retain component를
 각각 표시한다. 두 파일 모두 좌측에는 forget/retain 전체 task loss를 함께 둔다.
 Baseline을 split 없이 실행한 경우에만 두 curve가 없다. `summary.json`은
-공통적으로 method, objective, completed epochs, optimizer steps,
-checkpoint/log/history 경로, config, 초기/최종 forget·retain metrics를 기록한다.
+method, 완료 epoch, 입력 checkpoint/split, sample exposure,
+checkpoint/log/history 경로만 기록한다.
 `training.log`에는 해당 실행의 setup, epoch, done 콘솔 행을 원문 그대로 기록한다.

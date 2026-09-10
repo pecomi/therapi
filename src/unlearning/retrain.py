@@ -253,25 +253,17 @@ def retrain(args: argparse.Namespace) -> None:
     )
     summary = {
         "method": "retrain",
-        "objective": "minimize_source_loss_plus_retain_target_loss",
-        "objective_coefficients": {"source": 1.0, "forget": 0.0, "retain": 1.0},
-        "sampling": "one_shuffled_retain_pass_per_epoch",
-        "batch_size": args.batch_size,
         "completed_epochs": args.epochs,
-        "optimizer_steps": args.epochs * len(retain_loader),
-        "forget_samples_seen": 0,
-        "retain_samples_seen": args.epochs * len(retain_indices),
+        "split_dir": str(Path(args.split_dir).resolve()),
+        "samples_seen": {
+            "forget": 0,
+            "retain": args.epochs * len(retain_indices),
+        },
         "checkpoint": str(checkpoint_path.resolve()),
         "training_log": str((output_dir / "training.log").resolve()),
         "history": str(history_path.resolve()),
         "loss_curve": str(curve_path.resolve()),
         "retain_loss_curve": str(retain_curve_path.resolve()),
-        "split_dir": str(Path(args.split_dir).resolve()),
-        "config": vars(args),
-        "initial_forget": initial_forget,
-        "initial_retain": initial_retain,
-        "final_forget": forget_metrics,
-        "final_retain": retain_metrics,
     }
     with (output_dir / "summary.json").open("w", encoding="utf-8") as handle:
         json.dump(summary, handle, indent=2, sort_keys=True)

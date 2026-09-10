@@ -250,18 +250,18 @@ def train_aligner(args):
         retain_curve_path = None
     summary = {
         "method": "baseline",
-        "objective": "minimize_source_loss_plus_target_loss",
-        "objective_coefficients": {"source": 1.0, "target": 1.0},
-        "sampling": "one_shuffled_full_target_pass_per_epoch",
-        "batch_size": args.batch_size,
         "completed_epochs": args.epochs,
-        "optimizer_steps": args.epochs * len(target_unlabeled_dataloader),
-        "forget_samples_seen": (
-            args.epochs * len(forget_indices) if forget_indices is not None else None
+        "split_dir": (
+            str(Path(args.split_dir).resolve()) if args.split_dir is not None else None
         ),
-        "retain_samples_seen": (
-            args.epochs * len(retain_indices) if retain_indices is not None else None
-        ),
+        "samples_seen": {
+            "forget": (
+                args.epochs * len(forget_indices) if forget_indices is not None else None
+            ),
+            "retain": (
+                args.epochs * len(retain_indices) if retain_indices is not None else None
+            ),
+        },
         "checkpoint": str(checkpoint_path.resolve()),
         "training_log": str((output_dir / 'training.log').resolve()),
         "history": str(history_path.resolve()),
@@ -269,14 +269,6 @@ def train_aligner(args):
         "retain_loss_curve": (
             str(retain_curve_path.resolve()) if retain_curve_path is not None else None
         ),
-        "split_dir": (
-            str(Path(args.split_dir).resolve()) if args.split_dir is not None else None
-        ),
-        "config": vars(args),
-        "initial_forget": initial_forget,
-        "initial_retain": initial_retain,
-        "final_forget": forget_metrics,
-        "final_retain": retain_metrics,
     }
     with (output_dir / 'summary.json').open('w', encoding='utf-8') as handle:
         json.dump(summary, handle, indent=2, sort_keys=True)

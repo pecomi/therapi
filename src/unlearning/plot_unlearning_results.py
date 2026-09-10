@@ -67,6 +67,12 @@ def _run_configuration(run_dir: Path, run_name: str, experiment_root: Path) -> d
         with summary_path.open(encoding="utf-8") as handle:
             summary = json.load(handle)
         config = summary.get("config") or summary.get("unlearning_config", {})
+        if not config and summary.get("checkpoint"):
+            import torch
+
+            checkpoint = Path(summary["checkpoint"])
+            if checkpoint.is_file():
+                config = torch.load(checkpoint, map_location="cpu").get("config", {})
         required = {"epochs", "lr", "center_weight", "unlearn_seed"}
         if required <= set(config):
             return {

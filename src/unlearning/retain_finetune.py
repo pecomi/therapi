@@ -164,11 +164,6 @@ def joint_unlearn(args: argparse.Namespace) -> None:
     exp_classifier.load_state_dict(checkpoint["exp_dis_classifier"])
     if "center_criterion" in checkpoint:
         center.load_state_dict(checkpoint["center_criterion"])
-        center_source = "checkpoint"
-    else:
-        center_source = (
-            f"reconstructed_from_original_train_seed_{args.original_train_seed}"
-        )
 
     # Match gradient_ascent.py: optimize the complete target-loss path while
     # keeping the two decoders and the fixed center anchors unchanged.
@@ -439,9 +434,6 @@ def joint_unlearn(args: argparse.Namespace) -> None:
         _save_loss_outputs(history, output_dir, args.loss_scale)
         logger(format_epoch_log(history[-1], args.epochs))
 
-    final_forget = forget_metrics
-    final_retain = retain_metrics
-    final_source = source_metrics
     torch.save(
         {
             "epoch": checkpoint.get("epoch"),
@@ -463,37 +455,19 @@ def joint_unlearn(args: argparse.Namespace) -> None:
 
     summary = {
         "method": "neggrad_plus",
-        "objective": "minimize_beta_source_loss_plus_retain_loss_minus_one_minus_beta_forget_loss",
-        "objective_coefficients": {
-            "forget": -(1.0 - args.beta),
-            "retain": args.beta,
-            "source": args.beta,
+        "completed_epochs": args.epochs,
+        "baseline_checkpoint": str(input_checkpoint.resolve()),
+        "split_dir": str(Path(args.split_dir).resolve()),
+        "samples_seen": {
+            "forget": cumulative_forget_samples,
+            "retain": cumulative_retain_samples,
+            "source": cumulative_source_samples,
         },
-        "original_checkpoint": str(input_checkpoint.resolve()),
         "checkpoint": str(checkpoint_path.resolve()),
         "training_log": str((output_dir / "training.log").resolve()),
         "history": str((output_dir / "history.csv").resolve()),
         "loss_curve": str((output_dir / "loss_curve.png").resolve()),
         "retain_loss_curve": str((output_dir / "retain_loss_curve.png").resolve()),
-        "split_dir": str(Path(args.split_dir).resolve()),
-        "trainable_groups": [name for name, _ in groups],
-        "frozen_groups": ["source_decoder", "target_decoder", "center"],
-        "sampling": "retain_epoch_with_cycled_shuffled_forget_batches_and_full_source_per_step",
-        "completed_epochs": args.epochs,
-        "batch_size": args.batch_size,
-        "optimizer_steps": cumulative_steps,
-        "forget_samples_seen": cumulative_forget_samples,
-        "retain_samples_seen": cumulative_retain_samples,
-        "source_samples_seen": cumulative_source_samples,
-        "effective_forget_passes": cumulative_forget_samples / len(forget_indices),
-        "center_source": center_source,
-        "config": vars(args),
-        "initial_forget": input_forget,
-        "initial_retain": input_retain,
-        "initial_source": input_source,
-        "final_forget": final_forget,
-        "final_retain": final_retain,
-        "final_source": final_source,
     }
     with (output_dir / "summary.json").open("w", encoding="utf-8") as handle:
         json.dump(summary, handle, indent=2, sort_keys=True)

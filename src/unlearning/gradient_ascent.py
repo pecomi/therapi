@@ -130,9 +130,6 @@ def unlearn(args: argparse.Namespace) -> None:
     exp_classifier.load_state_dict(checkpoint["exp_dis_classifier"])
     if "center_criterion" in checkpoint:
         center.load_state_dict(checkpoint["center_criterion"])
-        center_source = "checkpoint"
-    else:
-        center_source = f"reconstructed_from_original_train_seed_{args.original_train_seed}"
 
     # Same target-loss path as ordinary training. Source decoder has no target
     # gradient; center anchors remain fixed, matching the original optimizer.
@@ -260,7 +257,6 @@ def unlearn(args: argparse.Namespace) -> None:
         _save_loss_outputs(history, output_dir, args.loss_scale)
         logger(format_epoch_log(history[-1], args.epochs))
 
-    final_forget, final_retain = forget_metrics, retain_metrics
     torch.save(
         {
             "epoch": checkpoint.get("epoch"),
@@ -281,25 +277,13 @@ def unlearn(args: argparse.Namespace) -> None:
     )
     summary = {
         "method": "neggrad",
-        "objective": "minimize_negative_forget_target_loss",
-        "objective_coefficients": {"forget": -1.0, "retain": 0.0},
-        "sampling": "one_shuffled_forget_pass_per_epoch",
-        "batch_size": args.batch_size,
-        "optimizer_steps": cumulative_steps,
-        "forget_samples_seen": args.epochs * len(forget_indices),
-        "retain_samples_seen": 0,
-        "effective_forget_passes": float(args.epochs),
         "completed_epochs": args.epochs,
-        "center_source": center_source,
-        "original_checkpoint": str(input_checkpoint.resolve()),
+        "baseline_checkpoint": str(input_checkpoint.resolve()),
         "split_dir": str(Path(args.split_dir).resolve()),
-        "trainable_groups": [name for name, _ in groups],
-        "frozen_groups": ["source_decoder", "target_decoder", "center"],
-        "config": vars(args),
-        "initial_forget": baseline_forget,
-        "initial_retain": baseline_retain,
-        "final_forget": final_forget,
-        "final_retain": final_retain,
+        "samples_seen": {
+            "forget": args.epochs * len(forget_indices),
+            "retain": 0,
+        },
         "checkpoint": str(checkpoint_path.resolve()),
         "training_log": str((output_dir / "training.log").resolve()),
         "history": str((output_dir / "history.csv").resolve()),
