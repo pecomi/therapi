@@ -236,6 +236,25 @@ unlearning checkpoint가 배포용 새 aligner checkpoint다. GDSC 원본을 다
 expression을 새 checkpoint로 다시 align하고, 기존 파일을 덮어쓰지 않는 별도
 출력 경로에 새 CSG2A embedding을 만들어야 한다.
 
+프로젝트 루트의 `unlearning_pipeline.sh`는 이 연결 과정을 실행한다. 기본 실행은
+split, NegGrad+, deletion retraining, representation 평가이며, `embed` stage를
+추가하면 NegGrad+ checkpoint로 TCGA CSG2A embedding을 새 run 경로에 생성한다.
+`predictor_test` stage는 `PREDICTOR_CKPT_DIR`로 기존 GDSC predictor의 10-fold
+checkpoint 경로를 지정했을 때만 실행한다. predictor는 재학습하지 않는다.
+
+```bash
+BASELINE_CHECKPOINT=run/baseline_seed0/ckpts/THERAPI_aligner_GDSC_TCGA.pt \
+PREDICTOR_CKPT_DIR=run/predictor_seed0/ckpts \
+STAGES="split neggrad_plus retrain evaluate embed predictor_test" \
+RUN_NAME=neggradplus_beta09_seed0 BETA=0.9 \
+./unlearning_pipeline.sh
+```
+
+`DEPLOY_METHODS="baseline neggrad_plus retrain"`처럼 지정하면 세 checkpoint의
+TCGA embedding과 predictor test 결과를 각각 생성해 비교할 수 있다. 모든 command
+출력은 `run/<RUN_NAME>/pipeline.log`에 저장되고, 각 학습 단계의 `training.log`도
+각자의 `ckpts/`에 별도로 남는다.
+
 각 run의 `ckpts/`에는 다음 파일이 생성된다.
 
 ```text

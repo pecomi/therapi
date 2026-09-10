@@ -221,5 +221,10 @@ See [`src/unlearning/README.md`](src/unlearning/README.md) for file roles, exact
 objectives, sampling details, output fields, and the optional NegGrad multi-seed
 runner.
 
+`unlearning_pipeline.sh` chains the patient split, unlearning, deletion
+retraining, representation evaluation, and optional target-embedding/predictor
+inference stages. It reuses the existing GDSC predictor checkpoints: only the
+TCGA CSG2A embeddings are regenerated for each new aligner checkpoint.
+
 ## Contact
 If you have any questions or concerns, please send an email to [inyoung.sung@snu.ac.kr](inyoung.sung@snu.ac.kr).
