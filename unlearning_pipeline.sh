@@ -59,6 +59,9 @@ LATENT_DIM=${LATENT_DIM:-128}
 RECON_WEIGHT=${RECON_WEIGHT:-0.2}
 CLASS_WEIGHT=${CLASS_WEIGHT:-0.4}
 CENTER_WEIGHT=${CENTER_WEIGHT:-0.8}
+# Center-loss weight in the forget term only.  By default, preserve the
+# original objective; set to 0 to remove only forget-center ascent.
+FORGET_CENTER_WEIGHT=${FORGET_CENTER_WEIGHT:-$CENTER_WEIGHT}
 
 CSG2A_CKPT=${CSG2A_CKPT:-$ROOT/src/embedding/CSG2A_LINCSpretrained_Landmark.pt}
 STRING_EDGES=${STRING_EDGES:-$ROOT/src/embedding/CSG2A/data/STRING_edges.csv}
@@ -282,6 +285,7 @@ printf '%s\n' \
     "unlearn_seed=$UNLEARN_SEED" \
     "latent_dim=$LATENT_DIM" \
     "loss_weights=recon:$RECON_WEIGHT,class:$CLASS_WEIGHT,center:$CENTER_WEIGHT" \
+    "forget_center_weight=$FORGET_CENTER_WEIGHT" \
     "git_commit=$(git -C "$ROOT" rev-parse --short HEAD 2>/dev/null || echo n/a)"
 
 if has_stage split; then
@@ -361,6 +365,7 @@ if has_stage neggrad_plus; then
         --recon-weight "$RECON_WEIGHT" \
         --class-weight "$CLASS_WEIGHT" \
         --center-weight "$CENTER_WEIGHT" \
+        --forget-center-weight "$FORGET_CENTER_WEIGHT" \
         --beta "$BETA"
 fi
 

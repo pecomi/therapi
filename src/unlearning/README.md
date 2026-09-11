@@ -115,7 +115,14 @@ python src/unlearning/retain_finetune.py \
 L_NegGrad+ = beta * (L_GDSC + L_retain) - (1 - beta) * L_forget
 ```
 
-`beta`는 0 이상 1 이하이고 기본값은 `0.95`다. `history.csv`의
+기본적으로 `L_forget`에는 원래 target loss의 center 항이 포함된다. 실험적으로
+forget ascent에서만 center gradient를 제거하려면 `--forget-center-weight 0`을
+사용한다. 이 경우 retain과 GDSC source loss의 center 항은 그대로 유지된다.
+`forget_task`는 baseline/retrain과의 공정한 비교를 위해 center를 포함한 원래 loss로
+기록하고, 실제 unlearning objective에 사용된 값은
+`forget_objective_task`으로 별도 기록한다.
+
+`beta`는 0 이상 1 이하이고 기본값은 `0.9`다. `history.csv`의
 `evaluation_objective`에는 전체 GDSC와 고정 forget/retain set mean으로
 재계산한 위 목적함수가 기록된다. `source_task`은 같은 GDSC full-set loss다.
 
@@ -350,7 +357,7 @@ BETA=0.90 NEGGRAD_PLUS_LR=3e-4 \
 
 | 목적 | 변수 |
 | --- | --- |
-| NegGrad+ | `BETA`, `NEGGRAD_PLUS_LR`, `NEGGRAD_PLUS_EPOCHS`, `NEGGRAD_PLUS_BATCH_SIZE` |
+| NegGrad+ | `BETA`, `NEGGRAD_PLUS_LR`, `NEGGRAD_PLUS_EPOCHS`, `NEGGRAD_PLUS_BATCH_SIZE`, `FORGET_CENTER_WEIGHT` |
 | NegGrad | `NEGGRAD_LR`, `NEGGRAD_EPOCHS`, `NEGGRAD_BATCH_SIZE` |
 | baseline | `BASELINE_LR`, `BASELINE_EPOCHS`, `BASELINE_BATCH_SIZE` |
 | retraining | `RETRAIN_LR`, `RETRAIN_EPOCHS`, `RETRAIN_BATCH_SIZE` |

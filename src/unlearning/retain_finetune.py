@@ -91,11 +91,22 @@ def _validate_args(args: argparse.Namespace) -> None:
         raise ValueError(
             "loss weights must be non-negative and at least one must be positive"
         )
+    if args.forget_center_weight is not None and args.forget_center_weight < 0:
+        raise ValueError("forget center weight must be non-negative")
+
+
+def _forget_objective_task(losses: dict, args: argparse.Namespace):
+    """Return the forget loss used by NegGrad+, optionally reweighting center."""
+    return losses["task"] + (
+        args.forget_center_weight - args.center_weight
+    ) * losses["center"]
 
 
 def joint_unlearn(args: argparse.Namespace) -> None:
     """Run NegGrad+ with GDSC and retain-TCGA as the retained data."""
     _validate_args(args)
+    if args.forget_center_weight is None:
+        args.forget_center_weight = args.center_weight
     device = torch.device(args.device)
     data_dir = Path(args.data_dir)
     requested_output = Path(args.output_dir)
@@ -262,8 +273,9 @@ def joint_unlearn(args: argparse.Namespace) -> None:
     input_forget = evaluate(forget_eval_loader)
     input_retain = evaluate(retain_eval_loader)
     input_source = evaluate_source()
+    input_forget_objective_task = _forget_objective_task(input_forget, args)
     evaluation_objective = neggrad_plus_objective(
-        input_forget["task"],
+        input_forget_objective_task,
         input_retain["task"],
         args.beta,
         source_loss=input_source["task"],
@@ -275,6 +287,7 @@ def joint_unlearn(args: argparse.Namespace) -> None:
             input_retain,
             evaluation_objective=evaluation_objective,
             source_task=input_source["task"],
+            forget_objective_task=float(input_forget_objective_task),
         )
     ]
     logger(
@@ -282,6 +295,8 @@ def joint_unlearn(args: argparse.Namespace) -> None:
         f"retain_samples={len(retain_indices)} batch_size={args.batch_size} "
         f"source_samples={len(source_dataset)} "
         f"beta={args.beta:.6f} "
+        f"center_weight={args.center_weight:.6f} "
+        f"forget_center_weight={args.forget_center_weight:.6f} "
         f"original_train_seed={args.original_train_seed} "
         f"unlearn_seed={args.unlearn_seed}"
     )
@@ -343,6 +358,7 @@ def joint_unlearn(args: argparse.Namespace) -> None:
                 args.class_weight,
                 args.center_weight,
             )
+            forget_objective_task = _forget_objective_task(forget_losses, args)
             retain_output = forward_aligner(
                 models, retain_gex, source_gex, source_latent=source_latent
             )
@@ -356,7 +372,7 @@ def joint_unlearn(args: argparse.Namespace) -> None:
                 args.center_weight,
             )
             objective = neggrad_plus_objective(
-                forget_losses["task"],
+                forget_objective_task,
                 retain_losses["task"],
                 args.beta,
                 source_loss=source_losses["task"],
@@ -367,6 +383,7 @@ def joint_unlearn(args: argparse.Namespace) -> None:
                     objective,
                     source_losses["task"],
                     forget_losses["task"],
+                    forget_objective_task,
                     retain_losses["task"],
                 )
             ):
@@ -401,8 +418,9 @@ def joint_unlearn(args: argparse.Namespace) -> None:
         forget_metrics = evaluate(forget_eval_loader)
         retain_metrics = evaluate(retain_eval_loader)
         source_metrics = evaluate_source()
+        forget_objective_task = _forget_objective_task(forget_metrics, args)
         evaluation_objective = neggrad_plus_objective(
-            forget_metrics["task"],
+            forget_objective_task,
             retain_metrics["task"],
             args.beta,
             source_loss=source_metrics["task"],
@@ -411,6 +429,7 @@ def joint_unlearn(args: argparse.Namespace) -> None:
             math.isfinite(value)
             for value in (
                 forget_metrics["task"],
+                forget_objective_task,
                 retain_metrics["task"],
                 source_metrics["task"],
                 evaluation_objective,
@@ -425,6 +444,7 @@ def joint_unlearn(args: argparse.Namespace) -> None:
                 evaluation_objective=evaluation_objective,
                 gradient_norm=gradient_norm,
                 source_task=source_metrics["task"],
+                forget_objective_task=float(forget_objective_task),
                 **{
                     f"grad_{name}": value
                     for name, value in mean_group_norms.items()
@@ -505,6 +525,14 @@ if __name__ == "__main__":
     parser.add_argument("--recon-weight", type=float, default=0.2)
     parser.add_argument("--class-weight", type=float, default=0.4)
     parser.add_argument("--center-weight", type=float, default=0.8)
+    parser.add_argument(
+        "--forget-center-weight",
+        type=float,
+        default=None,
+        help=(
+            "center-loss weight in the forget term only; defaults to --center-weight"
+        ),
+    )
     parser.add_argument(
         "--loss-scale",
         choices=("linear", "log", "symlog"),
