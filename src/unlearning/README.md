@@ -369,6 +369,23 @@ BETA=0.90 NEGGRAD_PLUS_LR=3e-4 \
 지정해야 한다. 기존 manifest 경로가 있으면 `split` stage는 seed나 ratio와 무관하게
 그 파일을 그대로 재사용한다.
 
+### History 기반 보고용 sparse loss curve
+
+학습 중에는 매 epoch 전체 history를 `history.csv`에 기록한다. 보고용으로 epoch 0,
+5, 10, ... 및 마지막 epoch만 표시한 curve가 필요하면, 학습을 다시 실행하지 않고
+다음 utility를 사용한다.
+
+```bash
+python src/unlearning/plot_history_every.py \
+  --history run/unlearning_neggradplus_splitseed1/neggrad_plus_seed0/ckpts/history.csv \
+  --every 5 \
+  --loss-scale log
+```
+
+기본적으로 history와 같은 `ckpts/` 경로에 `loss_curve_every5.png`와
+`retain_loss_curve_every5.png`를 생성한다. 원래의 dense `loss_curve.png`와
+`retain_loss_curve.png`, 그리고 `history.csv`는 변경하지 않는다.
+
 각 run의 `ckpts/`에는 다음 파일이 생성된다.
 
 ```text
