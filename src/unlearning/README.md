@@ -115,9 +115,12 @@ python src/unlearning/retain_finetune.py \
 L_NegGrad+ = beta * (L_GDSC + L_retain) - (1 - beta) * L_forget
 ```
 
-기본적으로 `L_forget`에는 원래 target loss의 center 항이 포함된다. 실험적으로
-forget ascent에서만 center gradient를 제거하려면 `--forget-center-weight 0`을
-사용한다. 이 경우 retain과 GDSC source loss의 center 항은 그대로 유지된다.
+기본적으로 `L_forget`에는 원래 target loss와 같은 reconstruction,
+classification, center 가중치가 사용된다. Forget ascent에만 다른 component
+가중치를 적용하려면 `--forget-recon-weight`, `--forget-class-weight`,
+`--forget-center-weight`를 사용한다. 예를 들어
+`--forget-center-weight 0`은 forget ascent의 center gradient만 제거하며,
+retain과 GDSC source loss의 center 항은 그대로 유지된다.
 `forget_task`는 baseline/retrain과의 공정한 비교를 위해 center를 포함한 원래 loss로
 기록하고, 실제 unlearning objective에 사용된 값은
 `forget_objective_task`으로 별도 기록한다.
@@ -357,7 +360,7 @@ BETA=0.90 NEGGRAD_PLUS_LR=3e-4 \
 
 | 목적 | 변수 |
 | --- | --- |
-| NegGrad+ | `BETA`, `NEGGRAD_PLUS_LR`, `NEGGRAD_PLUS_EPOCHS`, `NEGGRAD_PLUS_BATCH_SIZE`, `FORGET_CENTER_WEIGHT` |
+| NegGrad+ | `BETA`, `NEGGRAD_PLUS_LR`, `NEGGRAD_PLUS_EPOCHS`, `NEGGRAD_PLUS_BATCH_SIZE`, `FORGET_RECON_WEIGHT`, `FORGET_CLASS_WEIGHT`, `FORGET_CENTER_WEIGHT` |
 | NegGrad | `NEGGRAD_LR`, `NEGGRAD_EPOCHS`, `NEGGRAD_BATCH_SIZE` |
 | baseline | `BASELINE_LR`, `BASELINE_EPOCHS`, `BASELINE_BATCH_SIZE` |
 | retraining | `RETRAIN_LR`, `RETRAIN_EPOCHS`, `RETRAIN_BATCH_SIZE` |

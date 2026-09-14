@@ -91,22 +91,39 @@ def _validate_args(args: argparse.Namespace) -> None:
         raise ValueError(
             "loss weights must be non-negative and at least one must be positive"
         )
-    if args.forget_center_weight is not None and args.forget_center_weight < 0:
-        raise ValueError("forget center weight must be non-negative")
+
+
+def _resolve_forget_weights(args: argparse.Namespace) -> None:
+    """Use the common target-loss weights unless forget-specific ones are set."""
+    defaults = {
+        "forget_recon_weight": args.recon_weight,
+        "forget_class_weight": args.class_weight,
+        "forget_center_weight": args.center_weight,
+    }
+    for name, default in defaults.items():
+        if getattr(args, name) is None:
+            setattr(args, name, default)
+
+    forget_weights = tuple(getattr(args, name) for name in defaults)
+    if any(weight < 0 for weight in forget_weights) or not any(forget_weights):
+        raise ValueError(
+            "forget loss weights must be non-negative and at least one must be positive"
+        )
 
 
 def _forget_objective_task(losses: dict, args: argparse.Namespace):
-    """Return the forget loss used by NegGrad+, optionally reweighting center."""
-    return losses["task"] + (
-        args.forget_center_weight - args.center_weight
-    ) * losses["center"]
+    """Return the forget loss used by NegGrad+ with its own component weights."""
+    return (
+        args.forget_recon_weight * losses["recon"]
+        + args.forget_class_weight * (losses["emb_class"] + losses["exp_class"])
+        + args.forget_center_weight * losses["center"]
+    )
 
 
 def joint_unlearn(args: argparse.Namespace) -> None:
     """Run NegGrad+ with GDSC and retain-TCGA as the retained data."""
     _validate_args(args)
-    if args.forget_center_weight is None:
-        args.forget_center_weight = args.center_weight
+    _resolve_forget_weights(args)
     device = torch.device(args.device)
     data_dir = Path(args.data_dir)
     requested_output = Path(args.output_dir)
@@ -296,6 +313,8 @@ def joint_unlearn(args: argparse.Namespace) -> None:
         f"source_samples={len(source_dataset)} "
         f"beta={args.beta:.6f} "
         f"center_weight={args.center_weight:.6f} "
+        f"forget_recon_weight={args.forget_recon_weight:.6f} "
+        f"forget_class_weight={args.forget_class_weight:.6f} "
         f"forget_center_weight={args.forget_center_weight:.6f} "
         f"original_train_seed={args.original_train_seed} "
         f"unlearn_seed={args.unlearn_seed}"
@@ -525,6 +544,24 @@ if __name__ == "__main__":
     parser.add_argument("--recon-weight", type=float, default=0.2)
     parser.add_argument("--class-weight", type=float, default=0.4)
     parser.add_argument("--center-weight", type=float, default=0.8)
+    parser.add_argument(
+        "--forget-recon-weight",
+        type=float,
+        default=None,
+        help=(
+            "reconstruction-loss weight in the forget term only; "
+            "defaults to --recon-weight"
+        ),
+    )
+    parser.add_argument(
+        "--forget-class-weight",
+        type=float,
+        default=None,
+        help=(
+            "classification-loss weight in the forget term only; "
+            "defaults to --class-weight"
+        ),
+    )
     parser.add_argument(
         "--forget-center-weight",
         type=float,

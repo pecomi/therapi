@@ -59,8 +59,10 @@ LATENT_DIM=${LATENT_DIM:-128}
 RECON_WEIGHT=${RECON_WEIGHT:-0.2}
 CLASS_WEIGHT=${CLASS_WEIGHT:-0.4}
 CENTER_WEIGHT=${CENTER_WEIGHT:-0.8}
-# Center-loss weight in the forget term only.  By default, preserve the
-# original objective; set to 0 to remove only forget-center ascent.
+# Forget-only weights default to the common target-loss weights.  They affect
+# only the ascent term; retain and GDSC use the common weights above.
+FORGET_RECON_WEIGHT=${FORGET_RECON_WEIGHT:-$RECON_WEIGHT}
+FORGET_CLASS_WEIGHT=${FORGET_CLASS_WEIGHT:-$CLASS_WEIGHT}
 FORGET_CENTER_WEIGHT=${FORGET_CENTER_WEIGHT:-$CENTER_WEIGHT}
 
 CSG2A_CKPT=${CSG2A_CKPT:-$ROOT/src/embedding/CSG2A_LINCSpretrained_Landmark.pt}
@@ -285,7 +287,7 @@ printf '%s\n' \
     "unlearn_seed=$UNLEARN_SEED" \
     "latent_dim=$LATENT_DIM" \
     "loss_weights=recon:$RECON_WEIGHT,class:$CLASS_WEIGHT,center:$CENTER_WEIGHT" \
-    "forget_center_weight=$FORGET_CENTER_WEIGHT" \
+    "forget_loss_weights=recon:$FORGET_RECON_WEIGHT,class:$FORGET_CLASS_WEIGHT,center:$FORGET_CENTER_WEIGHT" \
     "git_commit=$(git -C "$ROOT" rev-parse --short HEAD 2>/dev/null || echo n/a)"
 
 if has_stage split; then
@@ -365,6 +367,8 @@ if has_stage neggrad_plus; then
         --recon-weight "$RECON_WEIGHT" \
         --class-weight "$CLASS_WEIGHT" \
         --center-weight "$CENTER_WEIGHT" \
+        --forget-recon-weight "$FORGET_RECON_WEIGHT" \
+        --forget-class-weight "$FORGET_CLASS_WEIGHT" \
         --forget-center-weight "$FORGET_CENTER_WEIGHT" \
         --beta "$BETA"
 fi
