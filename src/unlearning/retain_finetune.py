@@ -41,6 +41,10 @@ from unlearning.objective import (
     forward_aligner,
     neggrad_plus_objective,
 )
+from unlearning.parameter_count import (
+    aligner_parameter_counts,
+    format_parameter_counts,
+)
 from unlearning.split import build_sample_table, load_manifest_indices
 from utils import set_seed
 
@@ -215,6 +219,15 @@ def joint_unlearn(args: argparse.Namespace) -> None:
         [{"name": name, "params": parameters} for name, parameters in groups],
         lr=args.lr,
     )
+    parameter_counts = aligner_parameter_counts(
+        source_ae,
+        target_encoder,
+        emb_classifier,
+        exp_classifier,
+        center,
+        optimizer,
+    )
+    logger(format_parameter_counts(parameter_counts))
     models = (source_ae, target_encoder, emb_classifier, exp_classifier)
 
     set_seed(args.unlearn_seed, logger=lambda _: None)
@@ -482,6 +495,7 @@ def joint_unlearn(args: argparse.Namespace) -> None:
             "exp_dis_classifier": exp_classifier.state_dict(),
             "center_criterion": center.state_dict(),
             "optimizer": optimizer.state_dict(),
+            "parameter_counts": parameter_counts,
             "method": "neggrad_plus",
             "completed_epochs": args.epochs,
             "optimizer_steps": cumulative_steps,
@@ -502,6 +516,7 @@ def joint_unlearn(args: argparse.Namespace) -> None:
             "retain": cumulative_retain_samples,
             "source": cumulative_source_samples,
         },
+        "parameter_counts": parameter_counts,
         "checkpoint": str(checkpoint_path.resolve()),
         "training_log": str((output_dir / "training.log").resolve()),
         "history": str((output_dir / "history.csv").resolve()),

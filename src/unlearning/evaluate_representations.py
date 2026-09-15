@@ -36,11 +36,13 @@ COMPARISONS = (
     ("unlearned", "retrained"),
 )
 RETRAINING_COMPARISONS = (
+    ("baseline", "unlearned"),
     ("baseline", "retrained"),
     ("unlearned", "retrained"),
 )
 CONSISTENCY_METRICS = (
     "weighted_expression_mse",
+    "weighted_expression_cosine_similarity",
 )
 LEGACY_OUTPUTS = (
     "representation_change_per_sample.csv",
@@ -303,6 +305,21 @@ def evaluate(args: argparse.Namespace) -> None:
                 .cpu()
                 .numpy()
             )
+            left_weighted = left_output["weighted_gex"]
+            right_weighted = right_output["weighted_gex"]
+            denominator = left_weighted.norm(dim=1) * right_weighted.norm(dim=1)
+            cosine_similarity = (
+                (left_weighted * right_weighted).sum(dim=1)
+                / denominator.clamp_min(torch.finfo(left_weighted.dtype).eps)
+            ).clamp(min=-1.0, max=1.0)
+            cosine_similarity = torch.where(
+                denominator > 0,
+                cosine_similarity,
+                torch.full_like(cosine_similarity, float("nan")),
+            )
+            consistency_chunks[comparison][
+                "weighted_expression_cosine_similarity"
+            ].append(cosine_similarity.cpu().numpy())
 
     sample_losses = {
         model: {loss: np.concatenate(chunks) for loss, chunks in losses.items()}

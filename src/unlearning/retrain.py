@@ -33,6 +33,10 @@ from unlearning.loss_history import (
     write_history,
 )
 from unlearning.objective import EVALUATION_BATCH_SIZE, evaluate_loader
+from unlearning.parameter_count import (
+    aligner_parameter_counts,
+    format_parameter_counts,
+)
 from unlearning.split import build_sample_table, load_manifest_indices
 from utils import set_seed
 
@@ -126,6 +130,15 @@ def retrain(args: argparse.Namespace) -> None:
         + list(exp_classifier.parameters()),
         lr=args.lr,
     )
+    parameter_counts = aligner_parameter_counts(
+        source_ae,
+        target_encoder,
+        emb_classifier,
+        exp_classifier,
+        center_criterion,
+        optimizer,
+    )
+    logger(format_parameter_counts(parameter_counts))
 
     source_gex = source_dataset.data.to(device)
     source_labels = source_dataset.dis_label.to(device)
@@ -229,6 +242,7 @@ def retrain(args: argparse.Namespace) -> None:
             "exp_dis_classifier": exp_classifier.state_dict(),
             "center_criterion": center_criterion.state_dict(),
             "optimizer": optimizer.state_dict(),
+            "parameter_counts": parameter_counts,
             "training_data": "GDSC_plus_retain_TCGA_only",
             "split_dir": str(Path(args.split_dir).resolve()),
             "config": vars(args),
@@ -259,6 +273,7 @@ def retrain(args: argparse.Namespace) -> None:
             "forget": 0,
             "retain": args.epochs * len(retain_indices),
         },
+        "parameter_counts": parameter_counts,
         "checkpoint": str(checkpoint_path.resolve()),
         "training_log": str((output_dir / "training.log").resolve()),
         "history": str(history_path.resolve()),

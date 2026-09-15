@@ -18,6 +18,10 @@ from unlearning.loss_history import (
     write_history,
 )
 from unlearning.objective import EVALUATION_BATCH_SIZE, evaluate_loader
+from unlearning.parameter_count import (
+    aligner_parameter_counts,
+    format_parameter_counts,
+)
 from unlearning.split import build_sample_table, load_manifest_indices
 from utils import set_seed
 from center_loss import CenterLoss
@@ -91,6 +95,15 @@ def train_aligner(args):
     center_criterion = CenterLoss(num_classes=num_tissue, feat_dim=dim_latent, device=args.device)
     classifier_criterion = nn.CrossEntropyLoss()
     optimizer = torch.optim.Adam(list(source_AE.parameters())+list(target_weightencoder.parameters())+list(emb_dis_classifier.parameters())+list(exp_dis_classifier.parameters()), lr=lr)
+    parameter_counts = aligner_parameter_counts(
+        source_AE,
+        target_weightencoder,
+        emb_dis_classifier,
+        exp_dis_classifier,
+        center_criterion,
+        optimizer,
+    )
+    logger(format_parameter_counts(parameter_counts))
 
     # Optional split tracking does not participate in optimization. It evaluates
     # the target loss on fixed, full forget/retain sets before training and after
@@ -227,6 +240,7 @@ def train_aligner(args):
                 'exp_dis_classifier': exp_dis_classifier.state_dict(),
                 'center_criterion': center_criterion.state_dict(),
                 'optimizer': optimizer.state_dict(),
+                'parameter_counts': parameter_counts,
                 'config': vars(args),
                 }, checkpoint_path)
     history_path = output_dir / 'history.csv'
@@ -262,6 +276,7 @@ def train_aligner(args):
                 args.epochs * len(retain_indices) if retain_indices is not None else None
             ),
         },
+        "parameter_counts": parameter_counts,
         "checkpoint": str(checkpoint_path.resolve()),
         "training_log": str((output_dir / 'training.log').resolve()),
         "history": str(history_path.resolve()),

@@ -155,8 +155,9 @@ GDSC source 673개는 삭제 대상이 아니므로 매 paired forget/retain ste
 tissue classifier를 보존하는 gradient를 제공하며, target Q/K에는 직접 gradient를
 보내지 않는다.
 
-`summary.json`에는 run을 식별하는 최소 정보만 기록한다: method, 완료 epoch,
-입력 baseline checkpoint(해당 시), split, sample 노출 수와 생성된 artifact 경로다.
+`summary.json`에는 run을 식별하는 정보와 parameter count를 기록한다: method,
+완료 epoch, 입력 baseline checkpoint(해당 시), split, sample 노출 수,
+`parameter_counts`, 생성된 artifact 경로다.
 목적함수 정의와 인자 설정은 코드 및 checkpoint 내부 `config`에, epoch별 metric은
 `history.csv`에 각각 한 번만 기록한다.
 
@@ -224,15 +225,26 @@ GDSC는 환자 split과 무관하므로 전체 cell line을 한 번 평가한다
 사이에서 얼마나 바뀌었는지 기록한다.
 
 `retraining_consistency_per_sample.csv`와
-`retraining_consistency_per_patient.csv`는 baseline/retrained 및
-unlearned/retrained의 직접 출력 차이를 각각 sample·patient 단위로 기록한다.
+`retraining_consistency_per_patient.csv`는 baseline/unlearned,
+baseline/retrained, unlearned/retrained의 직접 출력 차이를 각각 sample·patient
+단위로 기록한다.
 `retraining_consistency_summary.csv`에는 forget/retain 및 비교쌍별 mean/median을
 정리한다.
 
 - `weighted_expression_mse`: attention-weighted GDSC expression의 sample별 MSE
+- `weighted_expression_cosine_similarity`: 같은 sample에 대한 두 checkpoint의
+  attention-weighted GDSC expression output cosine similarity
 
-두 CSV의 비교쌍은 `baseline_vs_retrained`, `unlearned_vs_retrained`다.
-같은 forget/retain group에서 후자의 거리가 전자보다 작으면 unlearned output이
+모든 baseline, deletion-retrain, NegGrad, NegGrad+ run은 `training.log`, checkpoint,
+`summary.json`에 동일한 `parameter_counts`를 기록한다. `aligner_modules_total`은
+source AE와 target weight encoder 전체를, `effective_output_path`는 실제
+attention-weighted expression을 결정하는 source encoder와 target Q/K를 뜻한다.
+`optimizer_updated`는 해당 방법의 optimizer에 포함된 파라미터 수다.
+
+두 CSV의 비교쌍은 `baseline_vs_unlearned`, `baseline_vs_retrained`,
+`unlearned_vs_retrained`다.
+같은 forget/retain group에서 `unlearned_vs_retrained`의 MSE가
+`baseline_vs_retrained`보다 작고 cosine similarity가 더 크면 unlearned output이
 baseline보다 deletion-retraining output에 가까워진 것으로 해석한다. latent는
 좌표계 재배치 영향을 피하기 위해 기존 CKA/Frechet 결과로 보조 비교한다.
 
@@ -404,6 +416,6 @@ ckpts/
 `loss_curve.png`는 forget component, `retain_loss_curve.png`는 retain component를
 각각 표시한다. 두 파일 모두 좌측에는 forget/retain 전체 task loss를 함께 둔다.
 Baseline을 split 없이 실행한 경우에만 두 curve가 없다. `summary.json`은
-method, 완료 epoch, 입력 checkpoint/split, sample exposure,
-checkpoint/log/history 경로만 기록한다.
+method, 완료 epoch, 입력 checkpoint/split, sample exposure, parameter count,
+checkpoint/log/history 경로를 기록한다.
 `training.log`에는 해당 실행의 setup, epoch, done 콘솔 행을 원문 그대로 기록한다.

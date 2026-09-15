@@ -40,6 +40,10 @@ from unlearning.objective import (
     forward_aligner,
     neggrad_objective,
 )
+from unlearning.parameter_count import (
+    aligner_parameter_counts,
+    format_parameter_counts,
+)
 from unlearning.split import build_sample_table, load_manifest_indices
 from utils import set_seed
 
@@ -148,6 +152,15 @@ def unlearn(args: argparse.Namespace) -> None:
     optimizer = torch.optim.Adam(
         [{"name": name, "params": parameters} for name, parameters in groups], lr=args.lr
     )
+    parameter_counts = aligner_parameter_counts(
+        source_ae,
+        target_encoder,
+        emb_classifier,
+        exp_classifier,
+        center,
+        optimizer,
+    )
+    logger(format_parameter_counts(parameter_counts))
     models = (source_ae, target_encoder, emb_classifier, exp_classifier)
 
     set_seed(args.unlearn_seed, logger=lambda _: None)
@@ -269,6 +282,7 @@ def unlearn(args: argparse.Namespace) -> None:
             "exp_dis_classifier": exp_classifier.state_dict(),
             "center_criterion": center.state_dict(),
             "optimizer": optimizer.state_dict(),
+            "parameter_counts": parameter_counts,
             "original_checkpoint": str(input_checkpoint.resolve()),
             "split_dir": str(Path(args.split_dir).resolve()),
             "config": vars(args),
@@ -284,6 +298,7 @@ def unlearn(args: argparse.Namespace) -> None:
             "forget": args.epochs * len(forget_indices),
             "retain": 0,
         },
+        "parameter_counts": parameter_counts,
         "checkpoint": str(checkpoint_path.resolve()),
         "training_log": str((output_dir / "training.log").resolve()),
         "history": str((output_dir / "history.csv").resolve()),
