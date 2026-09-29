@@ -53,8 +53,8 @@ def _plot(
     epochs = history["epoch"]
     figure, axes = plt.subplots(1, 2, figsize=(12, 4.5))
 
-    axes[0].plot(epochs, history["forget_task"], marker="o", label="forget")
-    axes[0].plot(epochs, history["retain_task"], marker="o", label="retain")
+    axes[0].plot(epochs, history["forget_task"], label="forget")
+    axes[0].plot(epochs, history["retain_task"], label="retain")
     axes[0].set(
         title=f"Mean target alignment loss (every {every} epochs)",
         xlabel="epoch",
@@ -65,7 +65,7 @@ def _plot(
     for component in COMPONENTS:
         column = f"{component_assignment}_{component}"
         if column in history:
-            axes[1].plot(epochs, history[column], marker="o", label=component)
+            axes[1].plot(epochs, history[column], label=component)
     axes[1].set(
         title=f"{component_assignment.capitalize()} loss components",
         xlabel="epoch",

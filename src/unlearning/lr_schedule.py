@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import torch
+
 
 def parse_lr_schedule(spec: str | None, *, total_epochs: int) -> dict[int, float]:
     """Parse ``EPOCH:LR`` pairs applied at the start of one-based epochs.
@@ -50,3 +52,29 @@ def optimizer_lr(optimizer) -> float:
     if len(values) != 1:
         raise ValueError(f"optimizer parameter groups have different LRs: {values}")
     return values.pop()
+
+
+def create_lr_scheduler(
+    optimizer,
+    *,
+    name: str,
+    total_epochs: int,
+    cosine_eta_min: float,
+):
+    """Create an optional epoch scheduler while preserving constant-LR defaults."""
+    if name == "none":
+        return None
+    if name != "cosine":
+        raise ValueError(f"unsupported LR scheduler: {name}")
+
+    initial_lr = optimizer_lr(optimizer)
+    if not 0 <= cosine_eta_min < initial_lr:
+        raise ValueError(
+            "cosine eta_min must be non-negative and smaller than the initial LR, "
+            f"got eta_min={cosine_eta_min} initial_lr={initial_lr}"
+        )
+    return torch.optim.lr_scheduler.CosineAnnealingLR(
+        optimizer,
+        T_max=total_epochs,
+        eta_min=cosine_eta_min,
+    )

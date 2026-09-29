@@ -387,6 +387,19 @@ STAGES="baseline retrain" \
 ./unlearning_pipeline.sh
 ```
 
+수동 schedule 대신 cosine annealing을 선택할 수도 있다. 초기 LR은 그대로
+사용하고 마지막 epoch까지 `eta_min`을 향해 부드럽게 감소한다. Cosine을 사용할
+때는 `BASELINE_LR_SCHEDULE`과 `RETRAIN_LR_SCHEDULE`을 비워 둔다.
+
+```bash
+BASELINE_LR=1e-3 BASELINE_LR_SCHEDULER=cosine \
+BASELINE_COSINE_ETA_MIN=1e-5 \
+RETRAIN_LR=1e-3 RETRAIN_LR_SCHEDULER=cosine \
+RETRAIN_COSINE_ETA_MIN=1e-5 \
+STAGES="baseline retrain" \
+./unlearning_pipeline.sh
+```
+
 이 단계에서는 `history.csv`, loss curve, `training.log`를 보고 후보를 고른다.
 representation 평가까지 반복하려면 `evaluate`는 retrained checkpoint를 요구한다.
 같은 split의 retrained reference는 한 번만 만든 뒤 `RETRAIN_CHECKPOINT`로 재사용할
@@ -408,8 +421,8 @@ BETA=0.90 NEGGRAD_PLUS_LR=3e-4 \
 | --- | --- |
 | NegGrad+ | `BETA`, `NEGGRAD_PLUS_LR`, `NEGGRAD_PLUS_EPOCHS`, `NEGGRAD_PLUS_BATCH_SIZE`, `FORGET_RECON_WEIGHT`, `FORGET_CLASS_WEIGHT`, `FORGET_CENTER_WEIGHT` |
 | NegGrad | `NEGGRAD_LR`, `NEGGRAD_EPOCHS`, `NEGGRAD_BATCH_SIZE` |
-| baseline | `BASELINE_LR`, `BASELINE_EPOCHS`, `BASELINE_BATCH_SIZE` |
-| retraining | `RETRAIN_LR`, `RETRAIN_EPOCHS`, `RETRAIN_BATCH_SIZE` |
+| baseline | `BASELINE_LR`, `BASELINE_EPOCHS`, `BASELINE_BATCH_SIZE`, `BASELINE_LR_SCHEDULE`, `BASELINE_LR_SCHEDULER`, `BASELINE_COSINE_ETA_MIN` |
+| retraining | `RETRAIN_LR`, `RETRAIN_EPOCHS`, `RETRAIN_BATCH_SIZE`, `RETRAIN_LR_SCHEDULE`, `RETRAIN_LR_SCHEDULER`, `RETRAIN_COSINE_ETA_MIN` |
 | 공통 모델/목적함수 | `LATENT_DIM`, `RECON_WEIGHT`, `CLASS_WEIGHT`, `CENTER_WEIGHT` |
 | split | `SPLIT_DIR`, 새 manifest 생성 시 `FORGET_RATIO`, `SPLIT_SEED` |
 | deployment | `DEPLOY_METHODS`, `PREDICTOR_CKPT_DIR`, `CSG2A_CKPT`, `DOSE`, `TIME` |

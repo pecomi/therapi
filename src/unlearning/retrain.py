@@ -33,6 +33,7 @@ from unlearning.loss_history import (
     write_history,
 )
 from unlearning.lr_schedule import (
+    create_lr_scheduler,
     optimizer_lr,
     parse_lr_schedule,
     set_optimizer_lr,
@@ -139,6 +140,14 @@ def retrain(args: argparse.Namespace) -> None:
         args.lr_schedule,
         total_epochs=args.epochs,
     )
+    if args.lr_scheduler != "none" and lr_schedule:
+        raise ValueError("--lr-scheduler cosine cannot be combined with --lr-schedule")
+    epoch_scheduler = create_lr_scheduler(
+        optimizer,
+        name=args.lr_scheduler,
+        total_epochs=args.epochs,
+        cosine_eta_min=args.cosine_eta_min,
+    )
     parameter_counts = aligner_parameter_counts(
         source_ae,
         target_encoder,
@@ -180,6 +189,8 @@ def retrain(args: argparse.Namespace) -> None:
         f"[setup] forget_samples={len(forget_indices)} "
         f"retain_samples={len(retain_indices)} batch_size={args.batch_size} "
         f"initial_lr={args.lr:.8g} "
+        f"lr_scheduler={args.lr_scheduler} "
+        f"cosine_eta_min={args.cosine_eta_min:.8g} "
         f"lr_schedule={args.lr_schedule or 'none'} "
         f"seed={args.seed}"
     )
@@ -248,6 +259,8 @@ def retrain(args: argparse.Namespace) -> None:
         )
         history.append(row)
         logger(format_epoch_log(row, args.epochs))
+        if epoch_scheduler is not None:
+            epoch_scheduler.step()
 
     checkpoint_path = output_dir / f"THERAPI_aligner_{args.source}_{args.target}.pt"
     torch.save(
@@ -333,6 +346,10 @@ if __name__ == "__main__":
             "for example 101:3e-4,161:1e-4"
         ),
     )
+    parser.add_argument(
+        "--lr-scheduler", choices=("none", "cosine"), default="none"
+    )
+    parser.add_argument("--cosine-eta-min", type=float, default=1e-5)
     parser.add_argument("--recon-weight", type=float, default=0.2)
     parser.add_argument("--center-weight", type=float, default=0.8)
     parser.add_argument("--class-weight", type=float, default=0.4)

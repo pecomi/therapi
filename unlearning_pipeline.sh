@@ -46,6 +46,8 @@ BASELINE_EPOCHS=${BASELINE_EPOCHS:-199}
 BASELINE_BATCH_SIZE=${BASELINE_BATCH_SIZE:-128}
 BASELINE_LR=${BASELINE_LR:-1e-3}
 BASELINE_LR_SCHEDULE=${BASELINE_LR_SCHEDULE:-}
+BASELINE_LR_SCHEDULER=${BASELINE_LR_SCHEDULER:-none}
+BASELINE_COSINE_ETA_MIN=${BASELINE_COSINE_ETA_MIN:-1e-5}
 NEGGRAD_EPOCHS=${NEGGRAD_EPOCHS:-30}
 NEGGRAD_BATCH_SIZE=${NEGGRAD_BATCH_SIZE:-64}
 NEGGRAD_LR=${NEGGRAD_LR:-1e-5}
@@ -59,6 +61,8 @@ RETRAIN_EPOCHS=${RETRAIN_EPOCHS:-199}
 RETRAIN_BATCH_SIZE=${RETRAIN_BATCH_SIZE:-128}
 RETRAIN_LR=${RETRAIN_LR:-1e-3}
 RETRAIN_LR_SCHEDULE=${RETRAIN_LR_SCHEDULE:-}
+RETRAIN_LR_SCHEDULER=${RETRAIN_LR_SCHEDULER:-none}
+RETRAIN_COSINE_ETA_MIN=${RETRAIN_COSINE_ETA_MIN:-1e-5}
 LATENT_DIM=${LATENT_DIM:-128}
 RECON_WEIGHT=${RECON_WEIGHT:-0.2}
 CLASS_WEIGHT=${CLASS_WEIGHT:-0.4}
@@ -291,8 +295,12 @@ printf '%s\n' \
     "unlearn_seed=$UNLEARN_SEED" \
     "latent_dim=$LATENT_DIM" \
     "baseline_lr=$BASELINE_LR" \
+    "baseline_lr_scheduler=$BASELINE_LR_SCHEDULER" \
+    "baseline_cosine_eta_min=$BASELINE_COSINE_ETA_MIN" \
     "baseline_lr_schedule=${BASELINE_LR_SCHEDULE:-none}" \
     "retrain_lr=$RETRAIN_LR" \
+    "retrain_lr_scheduler=$RETRAIN_LR_SCHEDULER" \
+    "retrain_cosine_eta_min=$RETRAIN_COSINE_ETA_MIN" \
     "retrain_lr_schedule=${RETRAIN_LR_SCHEDULE:-none}" \
     "neggrad_plus_optimizer_lr=$NEGGRAD_PLUS_LR" \
     "neggrad_plus_retain_source_lr=$NEGGRAD_PLUS_RETAIN_LR" \
@@ -334,6 +342,8 @@ if has_stage baseline; then
             --batch-size "$BASELINE_BATCH_SIZE" \
             --lr "$BASELINE_LR" \
             --lr-schedule "$BASELINE_LR_SCHEDULE" \
+            --lr-scheduler "$BASELINE_LR_SCHEDULER" \
+            --cosine-eta-min "$BASELINE_COSINE_ETA_MIN" \
             --recon-weight "$RECON_WEIGHT" \
             --class-weight "$CLASS_WEIGHT" \
             --center-weight "$CENTER_WEIGHT"
@@ -401,6 +411,8 @@ if has_stage retrain; then
         --batch-size "$RETRAIN_BATCH_SIZE" \
         --lr "$RETRAIN_LR" \
         --lr-schedule "$RETRAIN_LR_SCHEDULE" \
+        --lr-scheduler "$RETRAIN_LR_SCHEDULER" \
+        --cosine-eta-min "$RETRAIN_COSINE_ETA_MIN" \
         --recon-weight "$RECON_WEIGHT" \
         --class-weight "$CLASS_WEIGHT" \
         --center-weight "$CENTER_WEIGHT"
