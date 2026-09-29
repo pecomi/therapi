@@ -17,6 +17,11 @@ from unlearning.loss_history import (
     split_metrics_row,
     write_history,
 )
+from unlearning.lr_schedule import (
+    optimizer_lr,
+    parse_lr_schedule,
+    set_optimizer_lr,
+)
 from unlearning.objective import EVALUATION_BATCH_SIZE, evaluate_loader
 from unlearning.parameter_count import (
     aligner_parameter_counts,
@@ -95,6 +100,10 @@ def train_aligner(args):
     center_criterion = CenterLoss(num_classes=num_tissue, feat_dim=dim_latent, device=args.device)
     classifier_criterion = nn.CrossEntropyLoss()
     optimizer = torch.optim.Adam(list(source_AE.parameters())+list(target_weightencoder.parameters())+list(emb_dis_classifier.parameters())+list(exp_dis_classifier.parameters()), lr=lr)
+    lr_schedule = parse_lr_schedule(
+        args.lr_schedule,
+        total_epochs=args.epochs,
+    )
     parameter_counts = aligner_parameter_counts(
         source_AE,
         target_weightencoder,
@@ -151,17 +160,27 @@ def train_aligner(args):
             0,
             initial_forget,
             initial_retain,
+            learning_rate=optimizer_lr(optimizer),
         )
     )
     logger(
         f'[setup] model={model_name} target_samples={len(target_unlabeled_dataset)} '
         f'batch_size={args.batch_size} '
+        f'initial_lr={args.lr:.8g} '
+        f'lr_schedule={args.lr_schedule or "none"} '
         f'seed={args.seed}'
     )
     logger(format_epoch_log(history[-1], args.epochs))
 
     # training
     for epoch in range(args.epochs):
+        epoch_number = epoch + 1
+        if epoch_number in lr_schedule:
+            set_optimizer_lr(optimizer, lr_schedule[epoch_number])
+            logger(
+                f'[lr] epoch={epoch_number} '
+                f'learning_rate={optimizer_lr(optimizer):.8g}'
+            )
         source_AE.train()
         target_weightencoder.train()
         emb_dis_classifier.train()
@@ -221,6 +240,7 @@ def train_aligner(args):
                 epoch + 1,
                 forget_metrics,
                 retain_metrics,
+                learning_rate=optimizer_lr(optimizer),
                 train_objective=train_losses,
                 train_source=g_losses,
                 train_target=t_losses,
@@ -277,6 +297,7 @@ def train_aligner(args):
             ),
         },
         "parameter_counts": parameter_counts,
+        "lr_schedule": lr_schedule,
         "checkpoint": str(checkpoint_path.resolve()),
         "training_log": str((output_dir / 'training.log').resolve()),
         "history": str(history_path.resolve()),
@@ -306,6 +327,14 @@ if __name__ == '__main__':
     parser.add_argument('--batch-size', type=int, default=128)
     parser.add_argument('--latent-dim', type=int, default=128)
     parser.add_argument('--lr', type=float, default=1e-3)
+    parser.add_argument(
+        '--lr-schedule',
+        default='',
+        help=(
+            'comma-separated one-based EPOCH:LR changes, '
+            'for example 101:3e-4,161:1e-4'
+        ),
+    )
     parser.add_argument('--recon-weight', type=float, default=0.2)
     parser.add_argument('--center-weight', type=float, default=0.8)
     parser.add_argument('--class-weight', type=float, default=0.4)

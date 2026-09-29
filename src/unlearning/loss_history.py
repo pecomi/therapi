@@ -9,6 +9,9 @@ from pathlib import Path
 
 _CORE_HISTORY_FIELDS = (
     "epoch",
+    "learning_rate",
+    "retain_learning_rate",
+    "forget_learning_rate",
     "train_objective",
     "evaluation_objective",
     "gradient_norm",
@@ -79,6 +82,9 @@ def format_epoch_log(row: dict, total_epochs: int) -> str:
         f"[epoch {int(row['epoch']):03d}/{total_epochs:03d}]",
     ]
     for key in (
+        "learning_rate",
+        "retain_learning_rate",
+        "forget_learning_rate",
         "train_objective",
         "evaluation_objective",
         "forget_task",

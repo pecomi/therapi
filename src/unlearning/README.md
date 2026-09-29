@@ -105,6 +105,8 @@ python src/unlearning/retain_finetune.py \
   --unlearn-seed 0 \
   --batch-size 128 \
   --lr 1e-3 \
+  --retain-lr 1e-4 \
+  --forget-lr 1e-3 \
   --beta 0.95 \
   --epochs 30
 ```
@@ -114,6 +116,15 @@ python src/unlearning/retain_finetune.py \
 ```text
 L_NegGrad+ = beta * (L_GDSC + L_retain) - (1 - beta) * L_forget
 ```
+
+`--retain-lr`는 retain과 GDSC source 보존 branch에 함께 적용되는 유효 LR이고,
+`--forget-lr`는 forget ascent branch의 유효 LR이다. 둘 다 생략하면 `--lr`과
+같아져 기존 objective와 완전히 동일하게 동작한다. 구현은 하나의 Adam update를
+유지하면서 각 branch를 `retain_lr / lr`, `forget_lr / lr`로 상대 scaling한다.
+따라서 이는 두 개의 독립 Adam optimizer를 사용하는 방식이 아니라, shared
+parameter에 도달하는 두 gradient branch의 상대적인 update 크기를 조절하는
+실험용 설정이다. `history.csv`, `training.log`, `summary.json`에 세 LR을 모두
+기록한다.
 
 기본적으로 `L_forget`에는 원래 target loss와 같은 reconstruction,
 classification, center 가중치가 사용된다. Forget ascent에만 다른 component
@@ -180,6 +191,16 @@ python src/unlearning/retrain.py \
 Baseline checkpoint에서 fine-tune하지 않는다. 무작위 초기화부터 시작하여 GDSC
 전체와 retain TCGA만으로 원본 `source loss + target loss` 학습을 반복한다.
 
+Baseline과 deletion retrain은 `--lr-schedule`로 epoch 중간의 LR 변경을 동일하게
+적용할 수 있다. schedule은 one-based `EPOCH:LR` 쌍의 쉼표 구분 문자열이다.
+
+```bash
+# epoch 1--100: 1e-3, 101--160: 3e-4, 161 이후: 1e-4
+--lr 1e-3 --lr-schedule "101:3e-4,161:1e-4"
+```
+
+각 epoch에 실제 적용된 값은 `history.csv`의 `learning_rate`에 기록된다.
+
 ## 6. 공통 로그와 산출물
 
 학습 방법의 `history.csv`는 가능한 경우 다음 공통 필드를 사용한다.
@@ -187,6 +208,8 @@ Baseline checkpoint에서 fine-tune하지 않는다. 무작위 초기화부터 �
 | 필드 | 의미 |
 | --- | --- |
 | `epoch` | 0은 update 전 상태, 1 이상은 완료된 epoch |
+| `learning_rate` | baseline/retrain optimizer에 실제 적용된 epoch별 LR |
+| `retain_learning_rate`, `forget_learning_rate` | NegGrad+의 retained/forget branch 유효 LR |
 | `train_objective` | baseline/retrain의 mini-batch training loss 평균 |
 | `evaluation_objective` | 결과 비교에 쓰는 full-set mean 방법별 목적함수 |
 | `source_task` | NegGrad+에서 평가한 전체 GDSC source loss |
@@ -350,7 +373,17 @@ RUN_NAME=ngp_beta090_lr3e4_seed0 \
 STAGES="neggrad_plus" \
 ORIGINAL_TRAIN_SEED=0 UNLEARN_SEED=0 \
 BETA=0.90 NEGGRAD_PLUS_LR=3e-4 \
+NEGGRAD_PLUS_RETAIN_LR=1e-4 NEGGRAD_PLUS_FORGET_LR=3e-4 \
 NEGGRAD_PLUS_EPOCHS=30 NEGGRAD_PLUS_BATCH_SIZE=128 \
+./unlearning_pipeline.sh
+```
+
+Baseline과 retrain에 같은 단계별 schedule을 적용하려면 다음 환경변수를 사용한다.
+
+```bash
+BASELINE_LR=1e-3 BASELINE_LR_SCHEDULE="101:3e-4,161:1e-4" \
+RETRAIN_LR=1e-3 RETRAIN_LR_SCHEDULE="101:3e-4,161:1e-4" \
+STAGES="baseline retrain" \
 ./unlearning_pipeline.sh
 ```
 

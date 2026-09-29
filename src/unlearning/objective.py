@@ -20,12 +20,22 @@ def neggrad_plus_objective(
     beta: float,
     *,
     source_loss=None,
+    retained_scale: float = 1.0,
+    forget_scale: float = 1.0,
 ):
-    """Objective minimized by NegGrad+, optionally retaining the source domain."""
+    """Objective minimized by NegGrad+, optionally retaining the source domain.
+
+    ``retained_scale`` applies jointly to retain and source preservation, while
+    ``forget_scale`` applies to forget ascent.  They default to one so existing
+    experiments keep their original objective exactly.
+    """
     retained_objective = retain_loss
     if source_loss is not None:
         retained_objective = retained_objective + source_loss
-    return beta * retained_objective - (1.0 - beta) * forget_loss
+    return (
+        retained_scale * beta * retained_objective
+        - forget_scale * (1.0 - beta) * forget_loss
+    )
 
 
 def forward_aligner(models, target_gex, source_gex, *, source_latent=None):

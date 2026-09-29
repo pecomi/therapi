@@ -84,6 +84,8 @@ def _validate_args(args: argparse.Namespace) -> None:
         "epochs": args.epochs,
         "batch_size": args.batch_size,
         "lr": args.lr,
+        "retain_lr": args.retain_lr,
+        "forget_lr": args.forget_lr,
     }
     invalid = {name: value for name, value in positive.items() if value <= 0}
     if invalid:
@@ -95,6 +97,14 @@ def _validate_args(args: argparse.Namespace) -> None:
         raise ValueError(
             "loss weights must be non-negative and at least one must be positive"
         )
+
+
+def _resolve_branch_lrs(args: argparse.Namespace) -> None:
+    """Default both objective branches to the optimizer LR for compatibility."""
+    if args.retain_lr is None:
+        args.retain_lr = args.lr
+    if args.forget_lr is None:
+        args.forget_lr = args.lr
 
 
 def _resolve_forget_weights(args: argparse.Namespace) -> None:
@@ -126,8 +136,9 @@ def _forget_objective_task(losses: dict, args: argparse.Namespace):
 
 def joint_unlearn(args: argparse.Namespace) -> None:
     """Run NegGrad+ with GDSC and retain-TCGA as the retained data."""
-    _validate_args(args)
+    _resolve_branch_lrs(args)
     _resolve_forget_weights(args)
+    _validate_args(args)
     device = torch.device(args.device)
     data_dir = Path(args.data_dir)
     requested_output = Path(args.output_dir)
@@ -219,6 +230,8 @@ def joint_unlearn(args: argparse.Namespace) -> None:
         [{"name": name, "params": parameters} for name, parameters in groups],
         lr=args.lr,
     )
+    retained_scale = args.retain_lr / args.lr
+    forget_scale = args.forget_lr / args.lr
     parameter_counts = aligner_parameter_counts(
         source_ae,
         target_encoder,
@@ -309,6 +322,8 @@ def joint_unlearn(args: argparse.Namespace) -> None:
         input_retain["task"],
         args.beta,
         source_loss=input_source["task"],
+        retained_scale=retained_scale,
+        forget_scale=forget_scale,
     )
     history = [
         split_metrics_row(
@@ -318,6 +333,9 @@ def joint_unlearn(args: argparse.Namespace) -> None:
             evaluation_objective=evaluation_objective,
             source_task=input_source["task"],
             forget_objective_task=float(input_forget_objective_task),
+            learning_rate=args.lr,
+            retain_learning_rate=args.retain_lr,
+            forget_learning_rate=args.forget_lr,
         )
     ]
     logger(
@@ -325,6 +343,11 @@ def joint_unlearn(args: argparse.Namespace) -> None:
         f"retain_samples={len(retain_indices)} batch_size={args.batch_size} "
         f"source_samples={len(source_dataset)} "
         f"beta={args.beta:.6f} "
+        f"optimizer_lr={args.lr:.8g} "
+        f"retain_lr={args.retain_lr:.8g} "
+        f"forget_lr={args.forget_lr:.8g} "
+        f"retained_scale={retained_scale:.8g} "
+        f"forget_scale={forget_scale:.8g} "
         f"center_weight={args.center_weight:.6f} "
         f"forget_recon_weight={args.forget_recon_weight:.6f} "
         f"forget_class_weight={args.forget_class_weight:.6f} "
@@ -408,6 +431,8 @@ def joint_unlearn(args: argparse.Namespace) -> None:
                 retain_losses["task"],
                 args.beta,
                 source_loss=source_losses["task"],
+                retained_scale=retained_scale,
+                forget_scale=forget_scale,
             )
             if not all(
                 torch.isfinite(value)
@@ -456,6 +481,8 @@ def joint_unlearn(args: argparse.Namespace) -> None:
             retain_metrics["task"],
             args.beta,
             source_loss=source_metrics["task"],
+            retained_scale=retained_scale,
+            forget_scale=forget_scale,
         )
         if not all(
             math.isfinite(value)
@@ -477,6 +504,9 @@ def joint_unlearn(args: argparse.Namespace) -> None:
                 gradient_norm=gradient_norm,
                 source_task=source_metrics["task"],
                 forget_objective_task=float(forget_objective_task),
+                learning_rate=args.lr,
+                retain_learning_rate=args.retain_lr,
+                forget_learning_rate=args.forget_lr,
                 **{
                     f"grad_{name}": value
                     for name, value in mean_group_norms.items()
@@ -517,6 +547,11 @@ def joint_unlearn(args: argparse.Namespace) -> None:
             "source": cumulative_source_samples,
         },
         "parameter_counts": parameter_counts,
+        "effective_learning_rates": {
+            "optimizer": args.lr,
+            "retain_and_source": args.retain_lr,
+            "forget": args.forget_lr,
+        },
         "checkpoint": str(checkpoint_path.resolve()),
         "training_log": str((output_dir / "training.log").resolve()),
         "history": str((output_dir / "history.csv").resolve()),
@@ -556,6 +591,20 @@ if __name__ == "__main__":
     parser.add_argument("--epochs", type=int, default=50)
     parser.add_argument("--batch-size", type=int, default=128)
     parser.add_argument("--lr", type=float, default=1e-3)
+    parser.add_argument(
+        "--retain-lr",
+        type=float,
+        default=None,
+        help=(
+            "effective LR for the combined retain+source branch; defaults to --lr"
+        ),
+    )
+    parser.add_argument(
+        "--forget-lr",
+        type=float,
+        default=None,
+        help="effective LR for the forget-ascent branch; defaults to --lr",
+    )
     parser.add_argument("--recon-weight", type=float, default=0.2)
     parser.add_argument("--class-weight", type=float, default=0.4)
     parser.add_argument("--center-weight", type=float, default=0.8)

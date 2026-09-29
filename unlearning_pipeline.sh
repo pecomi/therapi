@@ -45,16 +45,20 @@ PREDICTOR_NAME=${PREDICTOR_NAME:-THERAPI_predictor}
 BASELINE_EPOCHS=${BASELINE_EPOCHS:-199}
 BASELINE_BATCH_SIZE=${BASELINE_BATCH_SIZE:-128}
 BASELINE_LR=${BASELINE_LR:-1e-3}
+BASELINE_LR_SCHEDULE=${BASELINE_LR_SCHEDULE:-}
 NEGGRAD_EPOCHS=${NEGGRAD_EPOCHS:-30}
 NEGGRAD_BATCH_SIZE=${NEGGRAD_BATCH_SIZE:-64}
 NEGGRAD_LR=${NEGGRAD_LR:-1e-5}
 NEGGRAD_PLUS_EPOCHS=${NEGGRAD_PLUS_EPOCHS:-50}
 NEGGRAD_PLUS_BATCH_SIZE=${NEGGRAD_PLUS_BATCH_SIZE:-128}
 NEGGRAD_PLUS_LR=${NEGGRAD_PLUS_LR:-1e-3}
+NEGGRAD_PLUS_RETAIN_LR=${NEGGRAD_PLUS_RETAIN_LR:-$NEGGRAD_PLUS_LR}
+NEGGRAD_PLUS_FORGET_LR=${NEGGRAD_PLUS_FORGET_LR:-$NEGGRAD_PLUS_LR}
 BETA=${BETA:-0.9}
 RETRAIN_EPOCHS=${RETRAIN_EPOCHS:-199}
 RETRAIN_BATCH_SIZE=${RETRAIN_BATCH_SIZE:-128}
 RETRAIN_LR=${RETRAIN_LR:-1e-3}
+RETRAIN_LR_SCHEDULE=${RETRAIN_LR_SCHEDULE:-}
 LATENT_DIM=${LATENT_DIM:-128}
 RECON_WEIGHT=${RECON_WEIGHT:-0.2}
 CLASS_WEIGHT=${CLASS_WEIGHT:-0.4}
@@ -286,6 +290,13 @@ printf '%s\n' \
     "original_train_seed=$ORIGINAL_TRAIN_SEED" \
     "unlearn_seed=$UNLEARN_SEED" \
     "latent_dim=$LATENT_DIM" \
+    "baseline_lr=$BASELINE_LR" \
+    "baseline_lr_schedule=${BASELINE_LR_SCHEDULE:-none}" \
+    "retrain_lr=$RETRAIN_LR" \
+    "retrain_lr_schedule=${RETRAIN_LR_SCHEDULE:-none}" \
+    "neggrad_plus_optimizer_lr=$NEGGRAD_PLUS_LR" \
+    "neggrad_plus_retain_source_lr=$NEGGRAD_PLUS_RETAIN_LR" \
+    "neggrad_plus_forget_lr=$NEGGRAD_PLUS_FORGET_LR" \
     "loss_weights=recon:$RECON_WEIGHT,class:$CLASS_WEIGHT,center:$CENTER_WEIGHT" \
     "forget_loss_weights=recon:$FORGET_RECON_WEIGHT,class:$FORGET_CLASS_WEIGHT,center:$FORGET_CENTER_WEIGHT" \
     "git_commit=$(git -C "$ROOT" rev-parse --short HEAD 2>/dev/null || echo n/a)"
@@ -322,6 +333,7 @@ if has_stage baseline; then
             --epochs "$BASELINE_EPOCHS" \
             --batch-size "$BASELINE_BATCH_SIZE" \
             --lr "$BASELINE_LR" \
+            --lr-schedule "$BASELINE_LR_SCHEDULE" \
             --recon-weight "$RECON_WEIGHT" \
             --class-weight "$CLASS_WEIGHT" \
             --center-weight "$CENTER_WEIGHT"
@@ -364,6 +376,8 @@ if has_stage neggrad_plus; then
         --epochs "$NEGGRAD_PLUS_EPOCHS" \
         --batch-size "$NEGGRAD_PLUS_BATCH_SIZE" \
         --lr "$NEGGRAD_PLUS_LR" \
+        --retain-lr "$NEGGRAD_PLUS_RETAIN_LR" \
+        --forget-lr "$NEGGRAD_PLUS_FORGET_LR" \
         --recon-weight "$RECON_WEIGHT" \
         --class-weight "$CLASS_WEIGHT" \
         --center-weight "$CENTER_WEIGHT" \
@@ -386,6 +400,7 @@ if has_stage retrain; then
         --epochs "$RETRAIN_EPOCHS" \
         --batch-size "$RETRAIN_BATCH_SIZE" \
         --lr "$RETRAIN_LR" \
+        --lr-schedule "$RETRAIN_LR_SCHEDULE" \
         --recon-weight "$RECON_WEIGHT" \
         --class-weight "$CLASS_WEIGHT" \
         --center-weight "$CENTER_WEIGHT"

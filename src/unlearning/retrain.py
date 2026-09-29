@@ -32,6 +32,11 @@ from unlearning.loss_history import (
     split_metrics_row,
     write_history,
 )
+from unlearning.lr_schedule import (
+    optimizer_lr,
+    parse_lr_schedule,
+    set_optimizer_lr,
+)
 from unlearning.objective import EVALUATION_BATCH_SIZE, evaluate_loader
 from unlearning.parameter_count import (
     aligner_parameter_counts,
@@ -130,6 +135,10 @@ def retrain(args: argparse.Namespace) -> None:
         + list(exp_classifier.parameters()),
         lr=args.lr,
     )
+    lr_schedule = parse_lr_schedule(
+        args.lr_schedule,
+        total_epochs=args.epochs,
+    )
     parameter_counts = aligner_parameter_counts(
         source_ae,
         target_encoder,
@@ -164,15 +173,25 @@ def retrain(args: argparse.Namespace) -> None:
             initial_retain,
             train_source=None,
             train_target_retain=None,
+            learning_rate=optimizer_lr(optimizer),
         )
     ]
     logger(
         f"[setup] forget_samples={len(forget_indices)} "
         f"retain_samples={len(retain_indices)} batch_size={args.batch_size} "
+        f"initial_lr={args.lr:.8g} "
+        f"lr_schedule={args.lr_schedule or 'none'} "
         f"seed={args.seed}"
     )
     logger(format_epoch_log(history[-1], args.epochs))
     for epoch in range(args.epochs):
+        epoch_number = epoch + 1
+        if epoch_number in lr_schedule:
+            set_optimizer_lr(optimizer, lr_schedule[epoch_number])
+            logger(
+                f"[lr] epoch={epoch_number} "
+                f"learning_rate={optimizer_lr(optimizer):.8g}"
+            )
         source_ae.train()
         target_encoder.train()
         emb_classifier.train()
@@ -222,6 +241,7 @@ def retrain(args: argparse.Namespace) -> None:
             epoch + 1,
             forget_metrics,
             retain_metrics,
+            learning_rate=optimizer_lr(optimizer),
             train_objective=train_means["total"],
             train_source=train_means["source"],
             train_target_retain=train_means["target"],
@@ -274,6 +294,7 @@ def retrain(args: argparse.Namespace) -> None:
             "retain": args.epochs * len(retain_indices),
         },
         "parameter_counts": parameter_counts,
+        "lr_schedule": lr_schedule,
         "checkpoint": str(checkpoint_path.resolve()),
         "training_log": str((output_dir / "training.log").resolve()),
         "history": str(history_path.resolve()),
@@ -304,6 +325,14 @@ if __name__ == "__main__":
     parser.add_argument("--batch-size", type=int, default=128)
     parser.add_argument("--latent-dim", type=int, default=128)
     parser.add_argument("--lr", type=float, default=1e-3)
+    parser.add_argument(
+        "--lr-schedule",
+        default="",
+        help=(
+            "comma-separated one-based EPOCH:LR changes, "
+            "for example 101:3e-4,161:1e-4"
+        ),
+    )
     parser.add_argument("--recon-weight", type=float, default=0.2)
     parser.add_argument("--center-weight", type=float, default=0.8)
     parser.add_argument("--class-weight", type=float, default=0.4)
