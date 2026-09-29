@@ -93,9 +93,13 @@ def plot_history_every(args: argparse.Namespace) -> None:
     if missing:
         raise ValueError(f"history CSV is missing required columns: {missing}")
 
+    history = history[history["epoch"] >= args.min_epoch]
+    if history.empty:
+        raise ValueError(f"history CSV contains no rows from epoch {args.min_epoch}")
+
     selected = _select_epochs(history, args.every)
     output_dir.mkdir(parents=True, exist_ok=True)
-    suffix = f"every{args.every}"
+    suffix = f"from{args.min_epoch}_every{args.every}"
     _plot(
         selected,
         output_dir / f"loss_curve_{suffix}.png",
@@ -124,6 +128,7 @@ if __name__ == "__main__":
         help="directory for plots; defaults to the history.csv directory",
     )
     parser.add_argument("--every", type=int, default=5)
+    parser.add_argument("--min-epoch", type=int, default=0)
     parser.add_argument(
         "--loss-scale", choices=("linear", "log", "symlog"), default="log"
     )
