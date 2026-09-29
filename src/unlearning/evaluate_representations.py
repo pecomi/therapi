@@ -41,7 +41,7 @@ RETRAINING_COMPARISONS = (
     ("unlearned", "retrained"),
 )
 CONSISTENCY_METRICS = (
-    "weighted_expression_mse",
+    "weighted_expression_l2_distance",
     "weighted_expression_cosine_similarity",
 )
 LEGACY_OUTPUTS = (
@@ -298,15 +298,14 @@ def evaluate(args: argparse.Namespace) -> None:
         for left, right in RETRAINING_COMPARISONS:
             comparison = f"{left}_vs_{right}"
             left_output, right_output = batch_outputs[left], batch_outputs[right]
-            consistency_chunks[comparison]["weighted_expression_mse"].append(
-                (left_output["weighted_gex"] - right_output["weighted_gex"])
-                .pow(2)
-                .mean(dim=1)
-                .cpu()
-                .numpy()
-            )
             left_weighted = left_output["weighted_gex"]
             right_weighted = right_output["weighted_gex"]
+            # Per-sample Euclidean distance between the two weighted-expression
+            # outputs.  The per-patient CSV subsequently averages these values
+            # across samples belonging to the same patient.
+            consistency_chunks[comparison]["weighted_expression_l2_distance"].append(
+                (left_weighted - right_weighted).norm(p=2, dim=1).cpu().numpy()
+            )
             denominator = left_weighted.norm(dim=1) * right_weighted.norm(dim=1)
             cosine_similarity = (
                 (left_weighted * right_weighted).sum(dim=1)

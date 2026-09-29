@@ -231,9 +231,10 @@ baseline/retrained, unlearned/retrained의 직접 출력 차이를 각각 sample
 `retraining_consistency_summary.csv`에는 forget/retain 및 비교쌍별 mean/median을
 정리한다.
 
-- `weighted_expression_mse`: attention-weighted GDSC expression의 sample별 MSE
+- `weighted_expression_l2_distance`: attention-weighted GDSC expression output 간
+  sample별 L2 distance (0에 가까울수록 두 output이 유사)
 - `weighted_expression_cosine_similarity`: 같은 sample에 대한 두 checkpoint의
-  attention-weighted GDSC expression output cosine similarity
+  attention-weighted GDSC expression output cosine similarity (1에 가까울수록 유사)
 
 모든 baseline, deletion-retrain, NegGrad, NegGrad+ run은 `training.log`, checkpoint,
 `summary.json`에 동일한 `parameter_counts`를 기록한다. `aligner_modules_total`은
@@ -243,7 +244,7 @@ attention-weighted expression을 결정하는 source encoder와 target Q/K를 �
 
 두 CSV의 비교쌍은 `baseline_vs_unlearned`, `baseline_vs_retrained`,
 `unlearned_vs_retrained`다.
-같은 forget/retain group에서 `unlearned_vs_retrained`의 MSE가
+같은 forget/retain group에서 `unlearned_vs_retrained`의 L2 distance가
 `baseline_vs_retrained`보다 작고 cosine similarity가 더 크면 unlearned output이
 baseline보다 deletion-retraining output에 가까워진 것으로 해석한다. latent는
 좌표계 재배치 영향을 피하기 위해 기존 CKA/Frechet 결과로 보조 비교한다.
