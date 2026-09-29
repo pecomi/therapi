@@ -337,7 +337,7 @@ if __name__ == "__main__":
     parser.add_argument("--class-weight", type=float, default=0.4)
     parser.add_argument("--center-weight", type=float, default=0.8)
     parser.add_argument(
-        "--loss-scale", choices=("linear", "log", "symlog"), default="log",
+        "--loss-scale", choices=("linear", "log", "symlog"), default="linear",
         help="y-axis scale for the saved loss curve",
     )
     unlearn(parser.parse_args())

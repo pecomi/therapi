@@ -130,6 +130,6 @@ if __name__ == "__main__":
     parser.add_argument("--every", type=int, default=5)
     parser.add_argument("--min-epoch", type=int, default=0)
     parser.add_argument(
-        "--loss-scale", choices=("linear", "log", "symlog"), default="log"
+        "--loss-scale", choices=("linear", "log", "symlog"), default="linear"
     )
     plot_history_every(parser.parse_args())

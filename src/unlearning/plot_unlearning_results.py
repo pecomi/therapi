@@ -444,7 +444,7 @@ if __name__ == "__main__":
     parser.add_argument("--output-dir", required=True)
     parser.add_argument("--unit", choices=("patient", "sample"), default="patient")
     parser.add_argument(
-        "--loss-scale", choices=("linear", "log", "symlog"), default="log",
+        "--loss-scale", choices=("linear", "log", "symlog"), default="linear",
         help="y-axis scale for the original absolute-loss plot",
     )
     main(parser.parse_args())

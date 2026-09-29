@@ -637,7 +637,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--loss-scale",
         choices=("linear", "log", "symlog"),
-        default="log",
+        default="linear",
         help="y-axis scale for the saved full-set loss curve",
     )
     parser.add_argument("--beta", type=float, default=0.9)
